@@ -5,6 +5,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.function.Function;
 
 import com.mymods.mclauncher.auth.AuthProviderInfo;
@@ -18,6 +20,7 @@ import javafx.scene.control.ColorPicker;
 import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
+import javafx.scene.control.ListView;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.ScrollPane;
@@ -34,8 +37,12 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 import javafx.scene.paint.Color;
+import javafx.geometry.Rectangle2D;
 import javafx.util.StringConverter;
 
 /**
@@ -107,9 +114,13 @@ public final class LauncherView {
     public final ColorPicker appearanceAccent = new ColorPicker(Color.web("#63A86F"));
     public final Slider interfaceFontSize = new Slider(12, 17, 13);
     public final Label interfaceFontSizeValue = new Label("13 px");
+    public final Button chooseWallpaperButton = new Button("Выбрать изображение");
+    public final Button clearWallpaperButton = new Button("Сбросить");
+    public final Label wallpaperStatus = new Label("Обои не выбраны");
 
 // Mod loader profiles.
     public final ComboBox<String> loaderPicker = new ComboBox<>();
+    public final ComboBox<String> profileBaseVersion = new ComboBox<>();
 
     /**
      * Builds offered for the chosen loader on the chosen Minecraft version, newest first.
@@ -120,6 +131,11 @@ public final class LauncherView {
      */
     public final ComboBox<String> buildPicker = new ComboBox<>();
     public final TextField profileNameField = new TextField();
+    public final Button createProfileButton = new Button("Создать сборку");
+    public final ListView<String> profilesList = new ListView<>();
+    public final Button selectProfileButton = new Button("Выбрать для игры");
+    public final Button profileDetailsButton = new Button("Подробнее");
+    public final Button deleteProfileButton = new Button("Удалить сборку");
     public final Button openModsButton = new Button("Папка модов");
     public final Label profileInfo = new Label();
 
@@ -148,6 +164,7 @@ public final class LauncherView {
 
     public final TabPane tabs = new TabPane();
     private final Tab playTab = new Tab("Запуск");
+    private final Tab profilesTab = new Tab("Сборки");
     private final Tab settingsTab = new Tab("Настройки");
 
     /** Called when the user edits a credential, so the controller can refresh the play button. */
@@ -156,6 +173,8 @@ public final class LauncherView {
     private Function<String, String> versionLabelProvider = Function.identity();
 
     private BorderPane root;
+    private StackPane playSurface;
+    private final ImageView wallpaperView = new ImageView();
 
     public LauncherView() {
         for (ComboBox<String> box : List.of(versionBox, providerPicker, loaderPicker)) {
@@ -253,10 +272,12 @@ public final class LauncherView {
         });
 
         playTab.setClosable(false);
+        profilesTab.setClosable(false);
         settingsTab.setClosable(false);
         playTab.setContent(buildPlayTab());
+        profilesTab.setContent(buildProfilesTab());
         settingsTab.setContent(buildSettingsTab());
-        tabs.getTabs().addAll(playTab, settingsTab);
+        tabs.getTabs().addAll(playTab, profilesTab, settingsTab);
     }
 
     public BorderPane build() {
@@ -276,6 +297,48 @@ public final class LauncherView {
 
     public String versionLabel(String id) {
         return id == null ? "" : versionLabelProvider.apply(id);
+    }
+
+    public void setWallpaper(Path path) throws IOException {
+        if (playSurface == null) {
+            return;
+        }
+        if (path == null) {
+            wallpaperView.setImage(null);
+            wallpaperView.setViewport(null);
+            wallpaperView.setVisible(false);
+            wallpaperStatus.setText("Обои не выбраны");
+            return;
+        }
+        Image image = new Image(path.toUri().toString(), false);
+        if (image.isError() || image.getWidth() <= 0 || image.getHeight() <= 0) {
+            throw new IOException("Не удалось открыть изображение: " + path.getFileName(),
+                    image.getException());
+        }
+        wallpaperView.setImage(image);
+        wallpaperView.setVisible(true);
+        wallpaperStatus.setText(path.getFileName().toString());
+        updateWallpaperViewport();
+    }
+
+    private void updateWallpaperViewport() {
+        Image image = wallpaperView.getImage();
+        double width = playSurface == null ? 0 : playSurface.getWidth();
+        double height = playSurface == null ? 0 : playSurface.getHeight();
+        if (image == null || width <= 0 || height <= 0) {
+            return;
+        }
+        double imageRatio = image.getWidth() / image.getHeight();
+        double viewRatio = width / height;
+        if (imageRatio > viewRatio) {
+            double cropWidth = image.getHeight() * viewRatio;
+            wallpaperView.setViewport(new Rectangle2D(
+                    (image.getWidth() - cropWidth) / 2, 0, cropWidth, image.getHeight()));
+        } else {
+            double cropHeight = image.getWidth() / viewRatio;
+            wallpaperView.setViewport(new Rectangle2D(
+                    0, (image.getHeight() - cropHeight) / 2, image.getWidth(), cropHeight));
+        }
     }
 
     public void applyAppearance(String theme, String accentHex, int fontSize) {
@@ -349,36 +412,11 @@ public final class LauncherView {
         loaderNote.getStyleClass().add("dim");
         loaderNote.setWrapText(true);
 
-        loaderPicker.getItems().addAll(Arrays.stream(ModLoaderType.values())
-            .map(ModLoaderType::displayName).toList());
-        loaderPicker.getSelectionModel().select(ModLoaderType.VANILLA.displayName());
-        buildPicker.setPrefWidth(140);
-        buildPicker.setDisable(true);
-        buildPicker.getStyleClass().add("dim");
-        profileNameField.setPromptText("Название сборки (необязательно)");
-        profileNameField.setMaxWidth(Double.MAX_VALUE);
-        forgeSupportLink.setText("Поддержать Forge на Patreon");
-        forgeSupportLink.setVisible(false);
-        forgeSupportLink.setManaged(false);
-        forgeOptIn.setVisible(false);
-        forgeOptIn.setManaged(false);
-
-        HBox modRow = new HBox(8, loaderPicker, buildPicker);
-        modRow.setAlignment(Pos.CENTER_LEFT);
-        HBox.setHgrow(loaderPicker, Priority.ALWAYS);
-        HBox profileRow = new HBox(8, profileNameField, openModsButton);
-        profileRow.setAlignment(Pos.CENTER_LEFT);
-        HBox.setHgrow(profileNameField, Priority.ALWAYS);
-
         form.getChildren().addAll(
                 sectionLabel("ВЕРСИЯ MINECRAFT"),
                 versionBox,
-                modRow,
-                profileRow,
-                loaderNote,
-                forgeOptIn,
-                forgeSupportLink,
                 profileInfo,
+            openModsButton,
                 providerBox,
                 loginFieldsBox,
                 loginButton);
@@ -392,6 +430,83 @@ public final class LauncherView {
         VBox column = new VBox(scroll);
         column.setMaxWidth(Double.MAX_VALUE);
         column.setAlignment(Pos.TOP_CENTER);
+        playSurface = new StackPane(wallpaperView, column);
+        wallpaperView.setPreserveRatio(false);
+        wallpaperView.setOpacity(0.28);
+        wallpaperView.setMouseTransparent(true);
+        wallpaperView.fitWidthProperty().bind(playSurface.widthProperty());
+        wallpaperView.fitHeightProperty().bind(playSurface.heightProperty());
+        playSurface.widthProperty().addListener((obs, old, value) -> updateWallpaperViewport());
+        playSurface.heightProperty().addListener((obs, old, value) -> updateWallpaperViewport());
+        StackPane.setAlignment(column, Pos.TOP_CENTER);
+        return playSurface;
+    }
+
+    private Region buildProfilesTab() {
+        VBox box = new VBox(12);
+        box.setPadding(new Insets(20));
+        box.setMaxWidth(COLUMN_WIDTH);
+        box.setAlignment(Pos.TOP_LEFT);
+
+        profilesList.setPrefHeight(180);
+        profilesList.setPlaceholder(hint("Сборок пока нет"));
+        profilesList.setCellFactory(list -> new ListCell<>() {
+            @Override
+            protected void updateItem(String id, boolean empty) {
+                super.updateItem(id, empty);
+                setText(empty ? null : versionLabel(id));
+            }
+        });
+        selectProfileButton.setDisable(true);
+        profileDetailsButton.setDisable(true);
+        deleteProfileButton.getStyleClass().add("danger-outline");
+        loaderPicker.getItems().setAll(Arrays.stream(ModLoaderType.values())
+            .map(ModLoaderType::displayName).toList());
+        loaderPicker.getSelectionModel().select(ModLoaderType.VANILLA.displayName());
+        buildPicker.setPrefWidth(150);
+        buildPicker.setDisable(true);
+        buildPicker.getStyleClass().add("dim");
+        forgeSupportLink.setText("Поддержать Forge на Patreon");
+        forgeSupportLink.setVisible(false);
+        forgeSupportLink.setManaged(false);
+        forgeOptIn.setVisible(false);
+        forgeOptIn.setManaged(false);
+        profileBaseVersion.setMaxWidth(Double.MAX_VALUE);
+        loaderPicker.setMaxWidth(Double.MAX_VALUE);
+        buildPicker.setMaxWidth(Double.MAX_VALUE);
+        profileNameField.setPromptText("Название сборки, например SkyFactory");
+        profileNameField.setMaxWidth(Double.MAX_VALUE);
+        loaderNote.setWrapText(true);
+        profileInfo.setWrapText(true);
+
+        HBox profileActions = new HBox(8, selectProfileButton, profileDetailsButton,
+                deleteProfileButton);
+        HBox loaderRow = new HBox(8, loaderPicker, buildPicker);
+        HBox.setHgrow(loaderPicker, Priority.ALWAYS);
+        HBox.setHgrow(buildPicker, Priority.ALWAYS);
+
+        box.getChildren().addAll(
+                sectionLabel("УСТАНОВЛЕННЫЕ СБОРКИ"),
+                profilesList,
+                profileActions,
+                new Separator(),
+                sectionLabel("НОВАЯ СБОРКА"),
+                sectionLabel("ВЕРСИЯ MINECRAFT"),
+                profileBaseVersion,
+                loaderRow,
+                profileNameField,
+                loaderNote,
+                forgeOptIn,
+                forgeSupportLink,
+                createProfileButton);
+
+        ScrollPane scroll = new ScrollPane(box);
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        scroll.getStyleClass().add("form-scroll");
+        VBox column = new VBox(scroll);
+        column.setAlignment(Pos.TOP_CENTER);
+        column.setMaxWidth(Double.MAX_VALUE);
         return column;
     }
 
@@ -415,6 +530,9 @@ public final class LauncherView {
             new HBox(10, sectionLabel("АКЦЕНТНЫЙ ЦВЕТ"), appearanceAccent),
             sectionLabel("РАЗМЕР ТЕКСТА"),
             new HBox(10, interfaceFontSize, interfaceFontSizeValue),
+            sectionLabel("ОБОИ ОСНОВНОГО ЭКРАНА"),
+            new HBox(8, chooseWallpaperButton, clearWallpaperButton),
+            wallpaperStatus,
             new Separator(),
                 memoryHead,
                 maxMemorySlider,

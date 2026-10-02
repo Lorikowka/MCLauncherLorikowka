@@ -119,14 +119,15 @@ public final class UiCheck {
                 view.profileInfo.getText().contains("Fabric"));
         check("profile info counts mods",
                 view.profileInfo.getText().contains("модов: 1"));
-        check("profile hides new pack name field", !view.profileNameField.isManaged());
+        check("profile manager keeps pack name field available",
+            view.profileNameField.isManaged());
         check("profile shows its mods folder", view.openModsButton.isManaged());
         check("profile offers its mods folder", !view.openModsButton.isDisable());
 
         // Switching back to vanilla exposes loader choices without a separate install button.
         view.versionBox.getSelectionModel().select("1.20.1");
         controller.refreshState();
-        check("vanilla is the default loader", "Ванильный".equals(
+        check("loader manager defaults to Vanilla", "Ванильный".equals(
             new LauncherView().loaderPicker.getValue()));
         view.loaderPicker.getSelectionModel().select("Fabric");
         check("vanilla can create a loader profile on launch", view.profileNameField.isManaged());
@@ -135,17 +136,26 @@ public final class UiCheck {
         // The loader picker is what makes Forge and NeoForge reachable at all.
         check("loader picker offers every mod loader",
                 view.loaderPicker.getItems().containsAll(
-                List.of("Ванильный", "Fabric", "Forge", "NeoForge")));
+                    List.of("Ванильный", "Fabric", "Forge", "NeoForge")));
+        check("separate profiles tab exists", view.tabs.getTabs().stream()
+            .anyMatch(tab -> "Сборки".equals(tab.getText())));
+        check("profile list in manager tab", inScene(view.profilesList, root));
+        check("create profile action in manager tab", inScene(view.createProfileButton, root));
+        javafx.scene.control.Tab playTab = view.tabs.getTabs().stream()
+            .filter(tab -> "Запуск".equals(tab.getText())).findFirst().orElseThrow();
+        check("loader selection is kept off the Play tab",
+            !inScene(view.loaderPicker, playTab.getContent()));
         check("profile name field in scene", inScene(view.profileNameField, root));
         check("loader picker in scene", inScene(view.loaderPicker, root));
         // A pack often names one exact build, so the newest cannot be the only choice.
         check("build picker in scene", inScene(view.buildPicker, root));
 
-        // A profile cannot carry another loader, so the build list has nothing to offer.
+        // The manager's build picker is independent of the currently selected Play profile.
+        view.buildPicker.getItems().setAll("0.19.5-test");
         view.versionBox.getSelectionModel().select("1.20.1-fabric-1.20.1-0.19.5");
         controller.refreshState();
-        check("build picker clears for a profile", view.buildPicker.getItems().isEmpty());
-        check("build picker disabled for a profile", view.buildPicker.isDisable());
+        check("build picker remains independent of Play profile",
+            view.buildPicker.getItems().contains("0.19.5-test"));
         view.versionBox.getSelectionModel().select("1.20.1");
         controller.refreshState();
 
@@ -327,6 +337,16 @@ public final class UiCheck {
         check("delete all versions button", inScene(view.deleteAllVersionsButton, root));
         check("clean assets button", inScene(view.cleanAssetsButton, root));
         check("close action picker", inScene(view.closeAction, root));
+        check("wallpaper picker in settings", inScene(view.chooseWallpaperButton, root));
+        check("wallpaper reset in settings", inScene(view.clearWallpaperButton, root));
+        Path wallpaper = dataDir.resolve("ui-check-wallpaper.png");
+        java.awt.image.BufferedImage wallpaperPixels = new java.awt.image.BufferedImage(
+            4, 2, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        javax.imageio.ImageIO.write(wallpaperPixels, "png", wallpaper.toFile());
+        view.setWallpaper(wallpaper);
+        check("custom wallpaper is loaded", view.wallpaperStatus.getText().equals(wallpaper.getFileName().toString()));
+        view.setWallpaper(null);
+        check("wallpaper reset restores default state", "Обои не выбраны".equals(view.wallpaperStatus.getText()));
         check("theme picker in scene", inScene(view.appearanceTheme, root));
         check("accent picker in scene", inScene(view.appearanceAccent, root));
         check("text size control in scene", inScene(view.interfaceFontSize, root));

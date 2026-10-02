@@ -64,6 +64,8 @@ public final class LauncherConfig {
     public String appearanceAccent = "#63A86F";
     public int interfaceFontSize = 13;
 
+    public String mainMenuWallpaper = "";
+
     private static Path defaultGameDir() {
         String home = System.getProperty("user.home", ".");
         return Path.of(home, "MCLauncher");

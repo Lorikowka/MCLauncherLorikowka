@@ -55,6 +55,51 @@ tasks.named<JavaExec>("run") {
     )
 }
 
+val packageJdk = javaToolchains.launcherFor {
+    languageVersion = JavaLanguageVersion.of(17)
+}
+val packageDestination = layout.buildDirectory.dir(
+    "package-${project.version}-${System.currentTimeMillis()}")
+val packageJpackage = packageJdk.get().metadata.installationPath
+        .file(if (osName.startsWith("windows")) "bin/jpackage.exe" else "bin/jpackage")
+        .asFile.absolutePath
+
+tasks.register<Exec>("packageApp") {
+    group = "distribution"
+    description = "Creates a self-contained app image with its own Java runtime"
+    dependsOn(tasks.named("installDist"))
+    inputs.dir(layout.buildDirectory.dir("install/MCLauncher/lib"))
+    inputs.property("appVersion", project.version)
+    inputs.property("mainClass", application.mainClass)
+    doFirst {
+        commandLine(
+            packageJpackage,
+            "--type", "app-image",
+            "--name", "MCLauncher",
+            "--app-version", project.version.toString(),
+            "--vendor", "Lorikowka",
+            "--input", layout.buildDirectory.dir("install/MCLauncher/lib").get().asFile.absolutePath,
+            "--main-jar", "MCLauncher-${project.version}.jar",
+            "--main-class", application.mainClass.get(),
+            "--dest", packageDestination.get().asFile.absolutePath,
+            "--java-options", "-Dfile.encoding=UTF-8",
+        )
+    }
+    outputs.dir(packageDestination)
+}
+
+tasks.register<Zip>("packagePortableZip") {
+    group = "distribution"
+    description = "Packages the self-contained app image as a portable ZIP"
+    dependsOn(tasks.named("packageApp"))
+    from(packageDestination.map { it.dir("MCLauncher") }) {
+        into("MCLauncher")
+    }
+    from("distribution/windows")
+    archiveFileName.set("MCLauncher-${project.version}-windows-x64.zip")
+    destinationDirectory.set(layout.buildDirectory.dir("distributions"))
+}
+
 tasks.test {
     useJUnitPlatform()
     testLogging {

@@ -86,6 +86,7 @@ public final class LauncherApp extends Application {
 
         Scene scene = new Scene(view.build(), DEFAULT_WIDTH, DEFAULT_HEIGHT);
         scene.getStylesheets().add(LauncherApp.class.getResource("/launcher.css").toExternalForm());
+        controller.restoreWallpaper();
 
         stage.initStyle(StageStyle.UNDECORATED);
         stage.setTitle("MCLauncher");

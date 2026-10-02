@@ -34,6 +34,7 @@ import com.mymods.mclauncher.mc.VersionCatalog;
 import com.mymods.mclauncher.mc.VersionStore;
 import com.mymods.mclauncher.util.FileLog;
 import javafx.application.Platform;
+import javafx.stage.FileChooser;
 
 /**
  * Wires the widgets to the launcher services and keeps all long work off the UI thread.
@@ -96,6 +97,139 @@ private final LauncherView view;
         return profiles().find(selectedVersionId());
     }
 
+    public void createLoaderProfile() {
+        String baseId = selectedBaseVersionId();
+        ModLoaderType loader = selectedLoader();
+        if (!loader.moddable()) {
+            error("Выбери загрузчик", new IOException("Для Vanilla профиль создавать не нужно"));
+            return;
+        }
+        if (catalog.find(baseId) == null) {
+            error("Выбери версию Minecraft", new IOException(baseId));
+            return;
+        }
+        if (loader == ModLoaderType.FORGE && !view.forgeOptIn.isSelected()) {
+            error("Forge не установлен", new IllegalStateException(
+                    "Отметь согласие на загрузку Forge перед созданием сборки."));
+            return;
+        }
+        if (gameRunning() || installing) {
+            error("Нельзя создать сборку", new IllegalStateException(
+                    "Дождись завершения текущей операции."));
+            return;
+        }
+
+        String build = selectedBuild();
+        String name = view.profileNameField.getText().trim();
+        installing = true;
+        setBusy(true);
+        view.setStatus("Создаю профиль " + loader.displayName() + " ...");
+        view.progressBar.setProgress(-1);
+        view.progressBar.setVisible(true);
+        view.progressBar.setManaged(true);
+        view.progressLabel.setText("Устанавливаю loader profile ...");
+        updateUiState();
+
+        Thread worker = new Thread(() -> {
+            try {
+                ModProfile profile = ensureLoaderProfile(baseId, loader, build, name);
+                ModProfile created = profile;
+                Platform.runLater(() -> {
+                    addProfileToPicker(created.id());
+                    if (!view.profilesList.getItems().contains(created.id())) {
+                        view.profilesList.getItems().add(created.id());
+                    }
+                    view.profilesList.getSelectionModel().select(created.id());
+                    view.profileNameField.clear();
+                    view.profileInfo.setText(created.displayName() + " готова к запуску");
+                    view.log("Сборка создана: " + created.displayName());
+                    config.lastVersionId = created.id();
+                    config.save(dataDir);
+                    installing = false;
+                    setBusy(false);
+                    view.hideProgress();
+                    refreshManagedProfileButtons();
+                    updateUiState();
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    installing = false;
+                    setBusy(false);
+                    view.hideProgress();
+                    updateUiState();
+                    error("Не удалось создать сборку", e);
+                });
+            }
+        }, "launcher-create-profile");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void selectManagedProfile() {
+        String id = view.profilesList.getSelectionModel().getSelectedItem();
+        if (id == null) {
+            return;
+        }
+        addProfileToPicker(id);
+        view.versionBox.getSelectionModel().select(id);
+        view.tabs.getSelectionModel().select(0);
+        updateUiState();
+    }
+
+    private void showManagedProfileDetails() {
+        ModProfile profile = profiles().find(view.profilesList.getSelectionModel().getSelectedItem());
+        if (profile == null) {
+            return;
+        }
+        javafx.scene.control.Alert alert = new javafx.scene.control.Alert(
+                javafx.scene.control.Alert.AlertType.INFORMATION);
+        alert.setTitle("Сведения о сборке");
+        alert.setHeaderText(profile.displayName());
+        alert.setContentText("Minecraft " + profile.baseVersion() + "\n"
+                + profile.loader().displayName() + " " + profile.loaderVersion() + "\n"
+                + "Модов: " + profiles().modsIn(profile.id()).size() + "\n"
+                + "ID: " + profile.id());
+        alert.showAndWait();
+    }
+
+    private void deleteManagedProfile() {
+        String id = view.profilesList.getSelectionModel().getSelectedItem();
+        ModProfile profile = profiles().find(id);
+        if (profile == null) {
+            return;
+        }
+        if (gameRunning() || installing) {
+            error("Нельзя удалить сборку", new IllegalStateException("Сначала дождись завершения игры"));
+            return;
+        }
+        if (!confirm("Удалить сборку «" + profile.displayName() + "»?\n"
+                + "Её файлы и mods-папка будут удалены; общие библиотеки останутся.")) {
+            return;
+        }
+        boolean wasSelectedForPlay = id.equals(selectedVersionId());
+        try {
+            store().delete(id);
+            view.profilesList.getItems().remove(id);
+            view.versionBox.getItems().remove(id);
+            if (wasSelectedForPlay) {
+                String base = profile.baseVersion();
+                view.versionBox.getSelectionModel().select(base);
+            }
+            refreshManagedProfileButtons();
+            refreshDiskUsage();
+            updateUiState();
+        } catch (IOException e) {
+            error("Не удалось удалить сборку", e);
+        }
+    }
+
+    private void refreshManagedProfileButtons() {
+        boolean selected = view.profilesList.getSelectionModel().getSelectedItem() != null;
+        view.selectProfileButton.setDisable(!selected);
+        view.profileDetailsButton.setDisable(!selected);
+        view.deleteProfileButton.setDisable(!selected || installing || gameRunning());
+    }
+
     /**
      * Loads the builds offered for the chosen loader on the chosen Minecraft version.
      *
@@ -105,13 +239,11 @@ private final LauncherView view;
      * so switching back and forth costs nothing.
      */
     private void loadBuilds() {
-        String baseId = selectedVersionId();
+        String baseId = selectedBaseVersionId();
         ModLoaderType loader = selectedLoader();
-        // A profile cannot be extended by another loader, and an id the catalog has never heard of
-        // has no build list to ask for.
+        // Only vanilla catalog versions can be used as a profile base.
         boolean installable = loader.moddable()
-            && !baseId.isBlank()
-                && selectedProfile() == null
+                && !baseId.isBlank()
                 && catalog.find(baseId) != null;
         if (!installable) {
             buildsKey = null;
@@ -190,9 +322,7 @@ private final LauncherView view;
      */
     private void refreshLoaderChoice() {
         boolean forge = selectedLoader() == ModLoaderType.FORGE;
-        boolean newProfile = selectedLoader().moddable() && selectedProfile() == null;
-        view.profileNameField.setVisible(newProfile);
-        view.profileNameField.setManaged(newProfile);
+        view.createProfileButton.setDisable(!selectedLoader().moddable() || installing);
         view.forgeOptIn.setVisible(forge);
         view.forgeOptIn.setManaged(forge);
         view.forgeSupportLink.setVisible(forge);
@@ -320,6 +450,7 @@ private final LauncherView view;
             store().delete(id);
             // A deleted profile must not linger in the picker as an entry that cannot be launched.
             view.versionBox.getItems().remove(id);
+            view.profilesList.getItems().remove(id);
             view.log("Версия " + id + " удалена");
             refreshDiskUsage();
             updateUiState();
@@ -348,6 +479,7 @@ private final LauncherView view;
             for (String id : profiles().ids()) {
                 view.versionBox.getItems().remove(id);
             }
+            view.profilesList.getItems().clear();
             view.log("Удалено версий: " + removed);
             refreshDiskUsage();
             updateUiState();
@@ -445,6 +577,8 @@ Platform.runLater(() -> {
                     List<String> liveProfiles = profiles().ids();
                     view.versionBox.getItems().setAll(ids);
                     liveProfiles.forEach(this::addProfileToPicker);
+                    view.profilesList.getItems().setAll(liveProfiles);
+                    view.profileBaseVersion.getItems().setAll(ids);
                     // A remembered version wins over the default one, so reopening the launcher
                     // lands on the version the user was actually playing. The lookup goes through
                     // the freshly filled list, so a profile created since the snapshot still counts.
@@ -454,6 +588,13 @@ Platform.runLater(() -> {
                     }
                     if (restore != null) {
                         view.versionBox.getSelectionModel().select(restore);
+                    }
+                    ModProfile restoredProfile = profiles().find(restore);
+                    String base = restoredProfile == null ? restore : restoredProfile.baseVersion();
+                    if (base != null && ids.contains(base)) {
+                        view.profileBaseVersion.getSelectionModel().select(base);
+                    } else if (preferred != null) {
+                        view.profileBaseVersion.getSelectionModel().select(preferred.id());
                     }
                     view.log("Доступно версий: " + ids.size()
                             + (liveProfiles.isEmpty() ? "" : " · профилей: " + liveProfiles.size()));
@@ -558,9 +699,10 @@ Platform.runLater(() -> {
         ModProfile profile = selectedProfile();
         ModLoaderType loader = profile == null ? selectedLoader() : ModLoaderType.VANILLA;
         boolean installLoader = profile == null && loader.moddable();
-        McVersion version = catalog.find(selectedVersionId());
+        String targetId = installLoader ? selectedBaseVersionId() : selectedVersionId();
+        McVersion version = catalog.find(targetId);
         if (version == null && profile == null) {
-            error("Версия не найдена", new IOException(selectedVersionId()));
+            error("Версия не найдена", new IOException(targetId));
             return;
         }
         if (version == null) {
@@ -617,6 +759,10 @@ Platform.runLater(() -> {
                     Platform.runLater(() -> {
                         addProfileToPicker(installedProfile.id());
                         view.versionBox.getSelectionModel().select(installedProfile.id());
+                        if (!view.profilesList.getItems().contains(installedProfile.id())) {
+                            view.profilesList.getItems().add(installedProfile.id());
+                        }
+                        view.profilesList.getSelectionModel().select(installedProfile.id());
                         view.profileNameField.clear();
                         config.lastVersionId = installedProfile.id();
                         config.save(dataDir);
@@ -754,6 +900,62 @@ Platform.runLater(() -> {
         }
     }
 
+    private void chooseWallpaper() {
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Выбрать обои основного экрана");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter(
+                "Изображения", "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif"));
+        java.io.File selected = chooser.showOpenDialog(view.tabs.getScene().getWindow());
+        if (selected == null) {
+            return;
+        }
+        Path source = selected.toPath().toAbsolutePath().normalize();
+        String fileName = source.getFileName().toString();
+        int dot = fileName.lastIndexOf('.');
+        String extension = dot < 0 ? ".img" : fileName.substring(dot).toLowerCase(Locale.ROOT);
+        Path target = dataDir.resolve("main-menu-wallpaper" + extension).toAbsolutePath().normalize();
+        Path previous = config.mainMenuWallpaper == null || config.mainMenuWallpaper.isBlank()
+            ? null : Path.of(config.mainMenuWallpaper);
+        try {
+            if (!source.equals(target)) {
+                Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
+                Files.copy(source, temporary, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.move(temporary, target,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            view.setWallpaper(target);
+            config.mainMenuWallpaper = target.toString();
+            config.save(dataDir);
+            removeManagedWallpaper(previous, target);
+        } catch (IOException e) {
+            error("Не удалось установить обои", e);
+        }
+    }
+
+    private void clearWallpaper() {
+        Path previous = config.mainMenuWallpaper == null || config.mainMenuWallpaper.isBlank()
+                ? null : Path.of(config.mainMenuWallpaper);
+        try {
+            view.setWallpaper(null);
+            config.mainMenuWallpaper = "";
+            config.save(dataDir);
+            removeManagedWallpaper(previous, null);
+        } catch (IOException e) {
+            error("Не удалось сбросить обои", e);
+        }
+    }
+
+    private void removeManagedWallpaper(Path previous, Path keep) throws IOException {
+        if (previous == null || (keep != null && previous.equals(keep))) {
+            return;
+        }
+        Path managedDir = dataDir.toAbsolutePath().normalize();
+        Path candidate = previous.toAbsolutePath().normalize();
+        if (candidate.startsWith(managedDir) && Files.isRegularFile(candidate)) {
+            Files.delete(candidate);
+        }
+    }
+
     /**
      * Makes sure there is a session to launch with.
      *
@@ -832,6 +1034,11 @@ private String selectedVersionId() {
         return value == null ? "" : value.trim();
     }
 
+    private String selectedBaseVersionId() {
+        String selected = view.profileBaseVersion.getValue();
+        return selected == null || selected.isBlank() ? selectedVersionId() : selected.trim();
+    }
+
     /**
      * Single source of truth for button text, enabled state and visibility.
      *
@@ -887,9 +1094,13 @@ private String selectedVersionId() {
 private void setBusy(boolean busy) {
         view.loginButton.setDisable(busy);
         view.versionBox.setDisable(busy);
+        view.profileBaseVersion.setDisable(busy);
         view.loaderPicker.setDisable(busy);
+        view.createProfileButton.setDisable(busy);
+        view.profilesList.setDisable(busy);
         view.profileNameField.setDisable(busy);
         view.buildPicker.setDisable(busy || selectedLoader() == ModLoaderType.VANILLA);
+        refreshManagedProfileButtons();
     }
 
 private void log(String line) {
@@ -954,6 +1165,25 @@ private void log(String line) {
         });
         view.playButton.setOnAction(e -> play());
         view.stopButton.setOnAction(e -> stopGame());
+        view.createProfileButton.setOnAction(e -> createLoaderProfile());
+        view.selectProfileButton.setOnAction(e -> selectManagedProfile());
+        view.profileDetailsButton.setOnAction(e -> showManagedProfileDetails());
+        view.deleteProfileButton.setOnAction(e -> deleteManagedProfile());
+        view.profilesList.getSelectionModel().selectedItemProperty()
+                .addListener((obs, old, value) -> refreshManagedProfileButtons());
+        view.profilesList.setOnMouseClicked(event -> {
+            if (event.getClickCount() == 2) {
+                selectManagedProfile();
+            }
+        });
+        view.profileBaseVersion.valueProperty().addListener((obs, old, value) -> {
+            if (value != null) {
+                if (selectedProfile() == null) {
+                    view.versionBox.getSelectionModel().select(value);
+                }
+                loadBuilds();
+            }
+        });
 view.loaderPicker.getSelectionModel().selectedItemProperty()
                 .addListener((obs, was, is) -> {
                     refreshLoaderChoice();
@@ -962,6 +1192,8 @@ view.loaderPicker.getSelectionModel().selectedItemProperty()
         view.forgeSupportLink.setOnAction(e -> openForgeSupport());
         view.openModsButton.setOnAction(e -> openModsFolder());
         view.openFolderButton.setOnAction(e -> openGameFolder());
+        view.chooseWallpaperButton.setOnAction(e -> chooseWallpaper());
+        view.clearWallpaperButton.setOnAction(e -> clearWallpaper());
         view.deleteVersionButton.setOnAction(e -> deleteSelectedVersion());
         view.deleteAllVersionsButton.setOnAction(e -> deleteAllVersions());
         view.cleanAssetsButton.setOnAction(e -> cleanAssets());
@@ -983,11 +1215,27 @@ view.versionBox.getSelectionModel().selectedItemProperty()
                     if (value != null && !label.equals(view.versionBox.getEditor().getText())) {
                         view.versionBox.getEditor().setText(label);
                     }
+                    ModProfile profile = profiles().find(value);
+                    String base = profile == null ? value : profile.baseVersion();
+                    if (base != null && view.profileBaseVersion.getItems().contains(base)
+                            && !base.equals(view.profileBaseVersion.getValue())) {
+                        view.profileBaseVersion.getSelectionModel().select(base);
+                    }
                     updateUiState();
-                    loadBuilds();
                 });
         // The version box is editable, so the typed value also has to re-check readiness.
         view.versionBox.getEditor().textProperty().addListener((obs, old, value) -> updateUiState());
+    }
+
+    public void restoreWallpaper() {
+        if (config.mainMenuWallpaper == null || config.mainMenuWallpaper.isBlank()) {
+            return;
+        }
+        try {
+            view.setWallpaper(Path.of(config.mainMenuWallpaper));
+        } catch (IOException | RuntimeException e) {
+            log("Не удалось восстановить обои основного экрана: " + e.getMessage());
+        }
     }
 
     private void saveAppearance() {

@@ -40,7 +40,22 @@ install.
 ./gradlew run          # Windows: gradlew.bat run
 ./gradlew build        # compiles, tests and assembles
 ./gradlew installDist  # produces build/install/MCLauncher
+./gradlew packageApp   # self-contained Windows app with bundled Java
+./gradlew packagePortableZip  # build/distributions/MCLauncher-0.1.0-windows-x64.zip
 ```
+
+The portable ZIP contains `MCLauncher.exe`, its own Java runtime, and a per-user PowerShell installer.
+Extract the ZIP, then run `Install-MCLauncher.ps1`; it installs under `%LOCALAPPDATA%\Programs`,
+creates Start menu and desktop shortcuts, and needs no admin rights. `Uninstall-MCLauncher.ps1` removes
+the application but preserves settings, wallpaper and logs in `%USERPROFILE%\.mclauncher`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-MCLauncher.ps1
+```
+
+This installs the launcher, not Minecraft game files: the launcher downloads Minecraft and the chosen
+loader from their official sources when needed. A traditional `.msi`/installer `.exe` requires WiX on
+Windows, which is not required by the included per-user installer.
 
 ## Verification
 
