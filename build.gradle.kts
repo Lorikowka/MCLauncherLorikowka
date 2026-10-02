@@ -1,3 +1,9 @@
+import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+import java.util.zip.ZipInputStream
+
 plugins {
     application
 }
@@ -98,6 +104,139 @@ tasks.register<Zip>("packagePortableZip") {
     from("distribution/windows")
     archiveFileName.set("MCLauncher-${project.version}-windows-x64.zip")
     destinationDirectory.set(layout.buildDirectory.dir("distributions"))
+}
+
+val wixHome = layout.buildDirectory.dir("tools/wix314").get().asFile
+val wixArchive = layout.buildDirectory.file("tools/wix314-binaries.zip").get().asFile
+val wixUrl = "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip"
+val wixSha256 = "6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31"
+val msiOutput = layout.buildDirectory.file(
+        "distributions/MCLauncher-${project.version}.msi")
+
+tasks.register("prepareWix") {
+    group = "distribution"
+    description = "Downloads and verifies the official portable WiX 3.14.1 tools"
+    outputs.dir(wixHome)
+    doLast {
+        if (File(wixHome, "candle.exe").isFile && File(wixHome, "light.exe").isFile) {
+            return@doLast
+        }
+
+        Files.createDirectories(wixArchive.parentFile.toPath())
+        val digest = MessageDigest.getInstance("SHA-256")
+        if (wixArchive.isFile) {
+            wixArchive.inputStream().use { input ->
+                val buffer = ByteArray(65536)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+        }
+        val existingHash = digest.digest().joinToString("") { "%02X".format(it) }
+        if (existingHash != wixSha256) {
+            val temporaryArchive = wixArchive.resolveSibling("wix314-binaries.zip.tmp")
+            URI(wixUrl).toURL().openStream().use { input ->
+                Files.copy(input, temporaryArchive.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+            val downloadedHash = MessageDigest.getInstance("SHA-256")
+                    .digest(Files.readAllBytes(temporaryArchive.toPath()))
+                    .joinToString("") { "%02X".format(it) }
+            check(downloadedHash == wixSha256) {
+                "WiX archive SHA-256 mismatch: $downloadedHash"
+            }
+            Files.move(temporaryArchive.toPath(), wixArchive.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING)
+        }
+
+        val temporaryDirectory = wixHome.resolveSibling("wix314-extract")
+        delete(temporaryDirectory)
+        Files.createDirectories(temporaryDirectory.toPath())
+        val extractionRoot = temporaryDirectory.toPath().toAbsolutePath().normalize()
+        ZipInputStream(Files.newInputStream(wixArchive.toPath())).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+            val target = extractionRoot.resolve(entry.name).normalize()
+            require(target.startsWith(extractionRoot)) {
+                    "Unsafe path in WiX archive: ${entry.name}"
+                }
+                if (entry.isDirectory) {
+                    Files.createDirectories(target)
+                } else {
+                    Files.createDirectories(target.parent)
+                    Files.copy(zip, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+        check(File(temporaryDirectory, "candle.exe").isFile
+                && File(temporaryDirectory, "light.exe").isFile) {
+            "Portable WiX archive is missing candle.exe or light.exe"
+        }
+        delete(wixHome)
+        Files.move(temporaryDirectory.toPath(), wixHome.toPath())
+    }
+}
+
+tasks.register<Exec>("packageWindowsMsi") {
+    group = "distribution"
+    description = "Creates a per-user Windows MSI using the JDK jpackage tool"
+    dependsOn(tasks.named("packageApp"))
+    dependsOn(tasks.named("prepareWix"))
+    inputs.dir(packageDestination.map { it.dir("MCLauncher") })
+    outputs.file(msiOutput)
+    environment("PATH", wixHome.absolutePath + ";" + System.getenv("PATH").orEmpty())
+    doFirst {
+        require(File(wixHome, "candle.exe").isFile && File(wixHome, "light.exe").isFile) {
+            "WiX 3.14 binaries are required in ${wixHome.absolutePath}"
+        }
+        commandLine(
+            packageJpackage,
+            "--type", "msi",
+            "--name", "MCLauncher",
+            "--app-version", project.version.toString(),
+            "--vendor", "Lorikowka",
+            "--app-image", packageDestination.get().dir("MCLauncher").asFile.absolutePath,
+            "--dest", layout.buildDirectory.dir("distributions").get().asFile.absolutePath,
+            "--win-per-user-install",
+            "--win-menu",
+            "--win-menu-group", "MCLauncher",
+            "--win-shortcut",
+        )
+    }
+}
+
+val exeOutput = layout.buildDirectory.file(
+        "distributions/MCLauncher-${project.version}.exe")
+
+tasks.register<Exec>("packageWindowsExe") {
+    group = "distribution"
+    description = "Creates a per-user Windows EXE installer using the JDK jpackage tool"
+    dependsOn(tasks.named("packageApp"))
+    dependsOn(tasks.named("prepareWix"))
+    inputs.dir(packageDestination.map { it.dir("MCLauncher") })
+    outputs.file(exeOutput)
+    environment("PATH", wixHome.absolutePath + ";" + System.getenv("PATH").orEmpty())
+    doFirst {
+        require(File(wixHome, "candle.exe").isFile && File(wixHome, "light.exe").isFile) {
+            "WiX 3.14 binaries are required in ${wixHome.absolutePath}"
+        }
+        commandLine(
+            packageJpackage,
+            "--type", "exe",
+            "--name", "MCLauncher",
+            "--app-version", project.version.toString(),
+            "--vendor", "Lorikowka",
+            "--app-image", packageDestination.get().dir("MCLauncher").asFile.absolutePath,
+            "--dest", layout.buildDirectory.dir("distributions").get().asFile.absolutePath,
+            "--win-per-user-install",
+            "--win-menu",
+            "--win-menu-group", "MCLauncher",
+            "--win-shortcut",
+        )
+    }
 }
 
 tasks.test {

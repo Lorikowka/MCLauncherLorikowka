@@ -42,6 +42,8 @@ install.
 ./gradlew installDist  # produces build/install/MCLauncher
 ./gradlew packageApp   # self-contained Windows app with bundled Java
 ./gradlew packagePortableZip  # build/distributions/MCLauncher-0.1.0-windows-x64.zip
+./gradlew packageWindowsMsi  # build/distributions/MCLauncher-0.1.0.msi
+./gradlew packageWindowsExe  # build/distributions/MCLauncher-0.1.0.exe
 ```
 
 The portable ZIP contains `MCLauncher.exe`, its own Java runtime, and a per-user PowerShell installer.
@@ -54,8 +56,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-MCLauncher.ps1
 ```
 
 This installs the launcher, not Minecraft game files: the launcher downloads Minecraft and the chosen
-loader from their official sources when needed. A traditional `.msi`/installer `.exe` requires WiX on
-Windows, which is not required by the included per-user installer.
+loader from their official sources when needed. The MSI and EXE tasks download the official portable
+WiX 3.14.1 bundle, verify its SHA-256, and keep it under ignored `build/tools`; no system-wide WiX
+installation is needed.
+
+Windows installer outputs are:
+
+- `build/distributions/MCLauncher-0.1.0.msi`
+- `build/distributions/MCLauncher-0.1.0.exe`
+- `build/distributions/MCLauncher-0.1.0-windows-x64.zip` for the portable copy
+
+Both native installers are configured for the current user and add Start menu and desktop shortcuts.
 
 ## Verification
 
