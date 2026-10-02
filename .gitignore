@@ -1,0 +1,35 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+bin/
+out/
+
+# Logs written by the launcher and by ad-hoc gradle runs
+*.log
+logs/
+smoke-launch.log
+
+# Local runtime state: what the launcher downloads and manages
+.mclauncher/
+versions/
+libraries/
+assets/
+runtimes/
+launcher_profiles.json
+*.part
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
