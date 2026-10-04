@@ -13,6 +13,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.google.gson.JsonObject;
 import com.mymods.mclauncher.GameStarter;
 import com.mymods.mclauncher.auth.AuthProviders;
 import com.mymods.mclauncher.auth.AuthProviderInfo;
@@ -20,19 +21,25 @@ import com.mymods.mclauncher.auth.AuthSession;
 import com.mymods.mclauncher.auth.Authenticator;
 import com.mymods.mclauncher.auth.LoginRequest;
 import com.mymods.mclauncher.auth.OfflineAuthenticator;
+import com.mymods.mclauncher.auth.SkinService;
 import com.mymods.mclauncher.auth.TokenStore;
+import com.mymods.mclauncher.config.BannerStore;
 import com.mymods.mclauncher.config.LauncherConfig;
 import com.mymods.mclauncher.mc.GameProcess;
 import com.mymods.mclauncher.mc.JavaRuntimes;
+import com.mymods.mclauncher.mc.LaunchPreflight;
 import com.mymods.mclauncher.mc.McVersion;
 import com.mymods.mclauncher.mc.ModLoaderCatalog;
 import com.mymods.mclauncher.mc.ModLoaderInstaller;
 import com.mymods.mclauncher.mc.ModLoaderType;
 import com.mymods.mclauncher.mc.ModProfile;
 import com.mymods.mclauncher.mc.ModProfileStore;
+import com.mymods.mclauncher.mc.ServerAddress;
 import com.mymods.mclauncher.mc.VersionCatalog;
+import com.mymods.mclauncher.mc.VersionResolver;
 import com.mymods.mclauncher.mc.VersionStore;
 import com.mymods.mclauncher.util.FileLog;
+import com.mymods.mclauncher.util.Util;
 import javafx.application.Platform;
 import javafx.stage.FileChooser;
 
@@ -59,11 +66,12 @@ public final class LauncherController {
     /** Loader and version whose build list is already in the picker, to avoid refetching. */
     private String buildsKey;
 
-private final LauncherView view;
+    private final LauncherView view;
     private final LauncherConfig config;
     private final Path dataDir;
     private final TokenStore tokens;
     private final VersionCatalog catalog;
+    private final BannerStore banners;
 
     /** Same lines as the window shows, but kept on disk so a failure survives closing it. */
     private final java.util.function.Consumer<String> fileLog;
@@ -76,10 +84,16 @@ private final LauncherView view;
      */
     private final Map<String, String> pendingCredentials = new HashMap<>();
 
-    private AuthSession session;
-    private GameProcess running;
-    private String providerId;
+    // Login and init workers write these, the UI thread reads them (and stopGame writes running),
+    // so each write has to become visible across threads rather than staying in one CPU's cache.
+    private volatile AuthSession session;
+    private volatile String accountUsername = "";
+    private volatile boolean needsRelogin;
+    private volatile GameProcess running;
+    private volatile String providerId;
     private boolean installing;
+    /** Set when the launcher hid itself for a running game, so the exit knows to bring it back. */
+    private boolean hiddenForGame;
 
     /** Last ten-percent step already written to the log, so progress lines are not duplicated. */
     private int loggedBucket = -1;
@@ -109,8 +123,7 @@ private final LauncherView view;
             return;
         }
         if (loader == ModLoaderType.FORGE && !view.forgeOptIn.isSelected()) {
-            error("Forge не установлен", new IllegalStateException(
-                    "Отметь согласие на загрузку Forge перед созданием сборки."));
+            view.flashForgeConsent();
             return;
         }
         if (gameRunning() || installing) {
@@ -136,10 +149,7 @@ private final LauncherView view;
                 ModProfile created = profile;
                 Platform.runLater(() -> {
                     addProfileToPicker(created.id());
-                    if (!view.profilesList.getItems().contains(created.id())) {
-                        view.profilesList.getItems().add(created.id());
-                    }
-                    view.profilesList.getSelectionModel().select(created.id());
+                    view.versionBox.getSelectionModel().select(created.id());
                     view.profileNameField.clear();
                     view.profileInfo.setText(created.displayName() + " готова к запуску");
                     view.log("Сборка создана: " + created.displayName());
@@ -165,19 +175,19 @@ private final LauncherView view;
         worker.start();
     }
 
+    /** The build the sidebar list points at, falling back to the picker when it is not focused. */
+    private String selectedBuildId() {
+        String id = view.buildList.getSelectionModel().getSelectedItem();
+        return id != null ? id : view.versionBox.getValue();
+    }
+
     private void selectManagedProfile() {
-        String id = view.profilesList.getSelectionModel().getSelectedItem();
-        if (id == null) {
-            return;
-        }
-        addProfileToPicker(id);
-        view.versionBox.getSelectionModel().select(id);
-        view.tabs.getSelectionModel().select(0);
+        view.showLaunch();
         updateUiState();
     }
 
     private void showManagedProfileDetails() {
-        ModProfile profile = profiles().find(view.profilesList.getSelectionModel().getSelectedItem());
+        ModProfile profile = profiles().find(selectedBuildId());
         if (profile == null) {
             return;
         }
@@ -186,14 +196,13 @@ private final LauncherView view;
         alert.setTitle("Сведения о сборке");
         alert.setHeaderText(profile.displayName());
         alert.setContentText("Minecraft " + profile.baseVersion() + "\n"
-                + profile.loader().displayName() + " " + profile.loaderVersion() + "\n"
-                + "Модов: " + profiles().modsIn(profile.id()).size() + "\n"
-                + "ID: " + profile.id());
+            + profile.loader().displayName() + " " + profile.loaderVersion() + "\n"
+            + "ID: " + profile.id());
         alert.showAndWait();
     }
 
     private void deleteManagedProfile() {
-        String id = view.profilesList.getSelectionModel().getSelectedItem();
+        String id = selectedBuildId();
         ModProfile profile = profiles().find(id);
         if (profile == null) {
             return;
@@ -207,27 +216,23 @@ private final LauncherView view;
             return;
         }
         boolean wasSelectedForPlay = id.equals(selectedVersionId());
-        try {
-            store().delete(id);
-            view.profilesList.getItems().remove(id);
-            view.versionBox.getItems().remove(id);
-            if (wasSelectedForPlay) {
-                String base = profile.baseVersion();
-                view.versionBox.getSelectionModel().select(base);
-            }
-            refreshManagedProfileButtons();
-            refreshDiskUsage();
-            updateUiState();
-        } catch (IOException e) {
-            error("Не удалось удалить сборку", e);
-        }
+        String base = profile.baseVersion();
+        runDiskAction("launcher-delete-profile", "Не удалось удалить сборку",
+                () -> store().delete(id),
+                () -> {
+                    if (wasSelectedForPlay) {
+                        view.versionBox.getSelectionModel().select(base);
+                    }
+                    view.versionBox.getItems().remove(id);
+                });
     }
 
     private void refreshManagedProfileButtons() {
-        boolean selected = view.profilesList.getSelectionModel().getSelectedItem() != null;
-        view.selectProfileButton.setDisable(!selected);
-        view.profileDetailsButton.setDisable(!selected);
-        view.deleteProfileButton.setDisable(!selected || installing || gameRunning());
+        String id = selectedBuildId();
+        boolean selected = id != null && !id.isBlank();
+        view.openBuildFolderItem.setDisable(!selected);
+        view.buildInfoItem.setDisable(!selected);
+        view.deleteBuildItem.setDisable(!selected || installing || gameRunning());
     }
 
     /**
@@ -336,17 +341,39 @@ private final LauncherView view;
      * JVM used to run a mod loader's own installer.
      *
      * <p>The installer is a Gradle-built jar, so it needs a JDK and it has to be new enough for the
-     * Minecraft version being installed: 1.20.5 and later require Java 21, everything before runs
-     * on 17. A loader that needs a different Java than the game would be surprising, and the
-     * game's own requirement is what the installer is built against.
+     * Minecraft version being installed. A loader that needs a different Java than the game would
+     * be surprising, and the game's own requirement is what the installer is built against.
      */
     private Path installerJava(String baseVersion) throws IOException, InterruptedException {
-        int required = baseVersion != null && baseVersion.startsWith("1.20.5")
-                ? 21
-                : (baseVersion != null && baseVersion.startsWith("1.21") ? 21 : 17);
         JavaRuntimes.Runtime runtime = JavaRuntimes.resolve(new JavaRuntimes.LauncherSettings(
-                config.javaPath, config.installRoot().resolve("runtimes")), required, this::log);
+                config.javaPath, config.installRoot().resolve("runtimes")),
+                installerJavaMajor(baseVersion), this::log);
         return runtime.java();
+    }
+
+    /**
+     * Java the installer runs on: 21 for 1.20.5 and newer, 17 otherwise.
+     *
+     * <p>Compared numerically rather than by prefix so 1.20.6, 1.21.x and every later minor land
+     * on the right side of the boundary. Snapshot ids are not loader targets and get the floor.
+     */
+    private static int installerJavaMajor(String baseVersion) {
+        if (baseVersion == null) {
+            return 17;
+        }
+        String[] parts = baseVersion.split("\\.");
+        try {
+            if (parts.length >= 2) {
+                int minor = Integer.parseInt(parts[1]);
+                int patch = parts.length >= 3 ? Integer.parseInt(parts[2]) : 0;
+                if (minor > 20 || (minor == 20 && patch >= 5)) {
+                    return 21;
+                }
+            }
+        } catch (NumberFormatException notASemver) {
+            // Falls through to 17.
+        }
+        return 17;
     }
 
     /** Opens the mods folder of the selected profile, creating it when missing. */
@@ -357,7 +384,7 @@ private final LauncherView view;
             return;
         }
         try {
-            Path dir = new GameStarter(config, catalog).loaderModsDir(profile.id(), profile, session);
+            Path dir = new GameStarter(config, catalog).loaderModsDir(profile.id(), profile);
             Files.createDirectories(dir);
             if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
                 error("Не удалось открыть папку",
@@ -392,12 +419,30 @@ private final LauncherView view;
         }
     }
 
-    /** Puts a profile id into the version picker, keeping vanilla entries in their order. */
+    /**
+     * Puts a profile into the version picker right after the vanilla version it is built on, so
+     * "1.19.2-forge-..." sits with "1.19.2" instead of piling up at the bottom of the list.
+     */
     private void addProfileToPicker(String id) {
         var items = view.versionBox.getItems();
-        if (!items.contains(id)) {
-            items.add(id);
+        if (items.contains(id)) {
+            return;
         }
+        String base = baseVersionOf(id);
+        int insertAt = items.size();
+        for (int i = items.size() - 1; i >= 0; i--) {
+            if (base.equals(baseVersionOf(items.get(i)))) {
+                insertAt = i + 1;
+                break;
+            }
+        }
+        items.add(insertAt, id);
+    }
+
+    /** A profile's base version; vanilla ids and snapshots are their own base. */
+    private String baseVersionOf(String id) {
+        ModProfile profile = profiles().find(id);
+        return profile == null ? id : profile.baseVersion();
     }
 
     /** Re-reads the profile list and refreshes the line describing the selected one. */
@@ -411,25 +456,63 @@ private final LauncherView view;
             view.openModsButton.setManaged(false);
             return;
         }
-        int mods = profiles().modsIn(profile.id()).size();
-        view.profileInfo.setText(profile.displayName() + " · модов: " + mods
-                + (mods == 0 ? " · положи .jar в папку модов" : ""));
+        view.profileInfo.setText(profile.displayName() + " · папка модов");
         view.openModsButton.setDisable(false);
         view.openModsButton.setVisible(true);
         view.openModsButton.setManaged(true);
     }
 
-    /** Refreshes the "on disk" line in the settings tab. */
-    public void refreshDiskUsage() {
+    /** Recomputes the "on disk" line; walks the install, so it belongs off the UI thread. */
+    private String diskUsageText() {
         VersionStore store = store();
         List<String> installed = store.installed();
         long total = 0;
         for (String id : installed) {
             total += store.sizeOf(id);
         }
-        view.versionDiskLabel.setText(installed.size() + " версий · "
-                + VersionStore.formatSize(total) + " · ассеты "
-                + VersionStore.formatSize(store.assetsSize()));
+        return installed.size() + " версий · " + VersionStore.formatSize(total)
+                + " · ассеты " + VersionStore.formatSize(store.assetsSize());
+    }
+
+    /**
+     * Refreshes the "on disk" line in the settings tab. The size walk covers the whole install,
+     * so it runs off the UI thread; the launch gate is deliberately not raised for it.
+     */
+    public void refreshDiskUsage() {
+        Util.background("launcher-disk-usage", () -> {
+            String disk = diskUsageText();
+            Platform.runLater(() -> view.versionDiskLabel.setText(disk));
+        }, e -> log("Не удалось посчитать занятое место: " + e.getMessage()));
+    }
+
+    /**
+     * Runs a disk-heavy action off the UI thread under the same busy gate the launch uses: a
+     * multi-gigabyte delete would freeze the window otherwise, and the gate keeps a second
+     * destructive click from racing the first. {@code uiFinish} runs on the UI thread after the
+     * work succeeds, before the gate opens again.
+     */
+    private void runDiskAction(String label, String failTitle,
+            Util.ThrowingRunnable work, Runnable uiFinish) {
+
+        installing = true;
+        setBusy(true);
+        updateUiState();
+        Util.background(label, () -> {
+            work.run();
+            String disk = diskUsageText();
+            Platform.runLater(() -> {
+                uiFinish.run();
+                view.versionDiskLabel.setText(disk);
+                installing = false;
+                setBusy(false);
+                updateUiState();
+            });
+        }, e -> Platform.runLater(() -> {
+            installing = false;
+            setBusy(false);
+            updateUiState();
+            error(failTitle, e);
+        }));
     }
 
     /** Deletes the version currently selected in the picker, after a confirmation. */
@@ -442,21 +525,17 @@ private final LauncherView view;
         if (!confirm("Удалить версию " + id + "?\nПапка версии будет удалена, ассеты останутся.")) {
             return;
         }
-        if (gameRunning()) {
+        if (gameRunning() || installing) {
             error("Нельзя удалить", new IllegalStateException("Сначала закрой игру"));
             return;
         }
-        try {
-            store().delete(id);
-            // A deleted profile must not linger in the picker as an entry that cannot be launched.
-            view.versionBox.getItems().remove(id);
-            view.profilesList.getItems().remove(id);
-            view.log("Версия " + id + " удалена");
-            refreshDiskUsage();
-            updateUiState();
-        } catch (IOException e) {
-            error("Не удалось удалить версию", e);
-        }
+        runDiskAction("launcher-delete-version", "Не удалось удалить версию",
+                () -> store().delete(id),
+                () -> {
+                    // A deleted profile must not linger in the picker as an entry that cannot be launched.
+                    view.versionBox.getItems().remove(id);
+                    view.log("Версия " + id + " удалена");
+                });
     }
 
     /** Deletes every installed version, after a confirmation. */
@@ -470,22 +549,20 @@ private final LauncherView view;
                 + "Они будут скачаны заново при следующем запуске.")) {
             return;
         }
-        if (gameRunning()) {
+        if (gameRunning() || installing) {
             error("Нельзя удалить", new IllegalStateException("Сначала закрой игру"));
             return;
         }
-        try {
-            int removed = store().deleteAll();
-            for (String id : profiles().ids()) {
-                view.versionBox.getItems().remove(id);
-            }
-            view.profilesList.getItems().clear();
-            view.log("Удалено версий: " + removed);
-            refreshDiskUsage();
-            updateUiState();
-        } catch (IOException e) {
-            error("Не удалось удалить версии", e);
-        }
+        int[] removed = {0};
+        List<String> profileIds = profiles().ids();
+        runDiskAction("launcher-delete-all", "Не удалось удалить версии",
+                () -> removed[0] = store().deleteAll(),
+                () -> {
+                    for (String id : profileIds) {
+                        view.versionBox.getItems().remove(id);
+                    }
+                    view.log("Удалено версий: " + removed[0]);
+                });
     }
 
     /** Clears shared assets, which is the largest reclaimable chunk of disk space. */
@@ -493,20 +570,14 @@ private final LauncherView view;
         if (!confirm("Удалить ассеты?\nОни общие для всех версий и весят несколько гигабайт.")) {
             return;
         }
-        if (gameRunning()) {
+        if (gameRunning() || installing) {
             error("Нельзя очистить", new IllegalStateException("Сначала закрой игру"));
             return;
         }
-        try {
-            if (store().deleteAssets()) {
-                view.log("Ассеты удалены");
-            } else {
-                view.log("Ассетов не было");
-            }
-            refreshDiskUsage();
-        } catch (IOException e) {
-            error("Не удалось удалить ассеты", e);
-        }
+        boolean[] hadAssets = {false};
+        runDiskAction("launcher-clean-assets", "Не удалось удалить ассеты",
+                () -> hadAssets[0] = store().deleteAssets(),
+                () -> view.log(hadAssets[0] ? "Ассеты удалены" : "Ассетов не было"));
     }
 
     /** True for every destructive settings action, so a stray click cannot wipe the install. */
@@ -521,7 +592,7 @@ private final LauncherView view;
     }
 
     public LauncherController(LauncherView view, LauncherConfig config, Path dataDir) {
-        this(view, config, dataDir, new VersionCatalog());
+        this(view, config, dataDir, new VersionCatalog(dataDir.resolve("version_manifest_v2.json")));
     }
 
     /** Seam for the UI check, which supplies a seeded catalog instead of hitting Mojang. */
@@ -530,13 +601,17 @@ private final LauncherView view;
         this.view = view;
         this.config = config;
         this.dataDir = dataDir;
-this.catalog = catalog;
+        this.catalog = catalog;
            this.fileLog = FileLog.open(dataDir);
            this.tokens = new TokenStore(config.tokensFile());
+           this.banners = BannerStore.load(dataDir);
+        view.serverAddress.setText(config.lastServerAddress == null ? "" : config.lastServerAddress);
         view.setVersionLabelProvider(id -> {
             ModProfile profile = profiles().find(id);
             return profile == null ? id : profile.displayName();
         });
+        view.bannerData = this::bannerDataFor;
+        view.bannerScreenshots = this::bannerScreenshotsFor;
         this.providerId = config.authProvider;
         view.fieldsEdited = this::updateUiState;
     }
@@ -563,7 +638,9 @@ this.catalog = catalog;
 
     /** Fills the version list and restores a cached session if possible. */
     public void start() {
-        view.log("Загружаю список версий с Mojang ...");
+        // start() itself runs on a pool thread (LauncherApp calls it via runAsync), so the log
+        // goes through the queued logger rather than touching the text area directly.
+        log("Загружаю список версий с Mojang ...");
         Thread worker = new Thread(() -> {
             try {
                 catalog.refresh();
@@ -577,7 +654,6 @@ Platform.runLater(() -> {
                     List<String> liveProfiles = profiles().ids();
                     view.versionBox.getItems().setAll(ids);
                     liveProfiles.forEach(this::addProfileToPicker);
-                    view.profilesList.getItems().setAll(liveProfiles);
                     view.profileBaseVersion.getItems().setAll(ids);
                     // A remembered version wins over the default one, so reopening the launcher
                     // lands on the version the user was actually playing. The lookup goes through
@@ -601,14 +677,22 @@ Platform.runLater(() -> {
                     updateUiState();
                 });
 
+                TokenStore.CachedSession cached = tokens.get(providerId);
                 AuthSession restored = AuthProviders.restoreSilent(config, tokens, providerId,
                         this::log);
                 if (restored != null) {
                     session = restored;
+                    accountUsername = restored.username();
+                    needsRelogin = false;
+                    loadAccountSkin(restored);
                     Platform.runLater(() -> {
                         view.log("Восстановлена сессия: " + restored.username());
                         updateUiState();
                     });
+                } else {
+                    accountUsername = cached == null ? config.lastUsername : cached.username();
+                    needsRelogin = cached != null;
+                    Platform.runLater(this::updateUiState);
                 }
             } catch (IOException | InterruptedException e) {
                 Platform.runLater(() -> error("Не удалось загрузить список версий", e));
@@ -625,6 +709,12 @@ Platform.runLater(() -> {
         providerId = newProviderId;
         config.authProvider = newProviderId;
         session = null;
+        TokenStore.CachedSession cached = tokens.get(newProviderId);
+        accountUsername = cached == null
+            ? (AuthProviderInfo.OFFLINE.equals(newProviderId) ? config.lastUsername : "")
+            : cached.username();
+        needsRelogin = cached != null && !AuthProviderInfo.OFFLINE.equals(newProviderId);
+        view.setAccountSkin(null);
 
         Map<String, String> labels = new LinkedHashMap<>();
         switch (newProviderId) {
@@ -660,6 +750,9 @@ Platform.runLater(() -> {
             try {
                 AuthSession result = authenticator.login(request, this::log);
                 session = result;
+                accountUsername = result.username();
+                needsRelogin = false;
+                loadAccountSkin(result);
                 // Do not keep the password around once the exchange succeeded.
                 pendingCredentials.clear();
                 Platform.runLater(() -> {
@@ -673,7 +766,7 @@ Platform.runLater(() -> {
                     showFields(Map.of("totp", "Код 2FA (6 цифр)"));
                     view.loginButton.setText("Подтвердить код");
                 });
-                view.log(more.getMessage());
+                log(more.getMessage());
             } catch (LoginRequest.Cancelled cancelled) {
                 Platform.runLater(() -> view.log("Вход отменён"));
             } catch (Exception e) {
@@ -696,6 +789,10 @@ Platform.runLater(() -> {
 
     /** Installs the selected version and starts the game. */
     public void play() {
+        play(null);
+    }
+
+    private void play(String quickPlayAddress) {
         ModProfile profile = selectedProfile();
         ModLoaderType loader = profile == null ? selectedLoader() : ModLoaderType.VANILLA;
         boolean installLoader = profile == null && loader.moddable();
@@ -717,6 +814,16 @@ Platform.runLater(() -> {
             }
         if (!ensureSession()) {
             return;
+        }
+
+        if (quickPlayAddress != null) {
+            try {
+                quickPlayAddress = ServerAddress.normalize(quickPlayAddress);
+            } catch (IllegalArgumentException e) {
+                error("Некорректный адрес", e);
+                return;
+            }
+            config.lastServerAddress = quickPlayAddress;
         }
 
             saveSettings();
@@ -747,6 +854,7 @@ Platform.runLater(() -> {
         final String loaderBuild = selectedBuild();
         final String packName = view.profileNameField.getText().trim();
         final AuthSession launchSession = session;
+        final String launchAddress = quickPlayAddress;
 
         Thread worker = new Thread(() -> {
             try {
@@ -759,19 +867,19 @@ Platform.runLater(() -> {
                     Platform.runLater(() -> {
                         addProfileToPicker(installedProfile.id());
                         view.versionBox.getSelectionModel().select(installedProfile.id());
-                        if (!view.profilesList.getItems().contains(installedProfile.id())) {
-                            view.profilesList.getItems().add(installedProfile.id());
-                        }
-                        view.profilesList.getSelectionModel().select(installedProfile.id());
                         view.profileNameField.clear();
                         config.lastVersionId = installedProfile.id();
                         config.save(dataDir);
                         updateUiState();
                     });
                     log("Профиль готов: " + launchProfile.displayName());
+                } else if (launchProfile != null) {
+                    // An existing profile is launched without reinstalling it, so its loader
+                    // files are checked here — the JSON being on disk does not prove they are.
+                    ensureLoaderArtifacts(launchProfile);
                 }
                 GameProcess process = starter.launch(launchVersion, launchProfile, launchSession,
-                        new GameStarter.Callbacks() {
+                    launchAddress, new GameStarter.Callbacks() {
                             @Override
                             public void log(String line) {
                                 LauncherController.this.log(line);
@@ -811,7 +919,17 @@ Platform.runLater(() -> {
                                     running = null;
                                     view.hideProgress();
                                     view.log("Игра закрыта, код " + code);
+                                    view.refreshBanner();
+                                    if (code != 0) {
+                                        view.showConsole();
+                                    }
                                     updateUiState();
+                                    if (hiddenForGame) {
+                                        hiddenForGame = false;
+                                        stage().show();
+                                        stage().setIconified(false);
+                                        stage().toFront();
+                                    }
                                 });
                             }
                         });
@@ -822,6 +940,17 @@ Platform.runLater(() -> {
                     view.hideProgress();
                     view.log("Игра запущена, PID " + process.pid());
                     updateUiState();
+                    // The "on close" preference also says what the window does when the game
+                    // takes over: hide-to-tray hides it, minimise iconifies it, plain close
+                    // leaves the launcher where it is.
+                    if ("hide".equals(config.closeAction) || "minimize".equals(config.closeAction)) {
+                        hiddenForGame = true;
+                        if ("hide".equals(config.closeAction)) {
+                            stage().hide();
+                        } else {
+                            stage().setIconified(true);
+                        }
+                    }
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
@@ -846,7 +975,11 @@ Platform.runLater(() -> {
         ModProfileStore store = profiles();
         String expectedId = ModProfile.buildId(loader, baseVersion, loaderVersion);
         ModProfile installed = store.find(expectedId);
-        if (installed == null) {
+        if (installed != null) {
+            // A profile whose loader files never finished downloading still reads as installed:
+            // the version JSON exists because the installer writes it before its downloads.
+            ensureLoaderArtifacts(installed);
+        } else {
             ModProfile requested = new ModProfile(expectedId, baseVersion, loader, loaderVersion,
                     List.of(), null);
             String actualId = new ModLoaderInstaller(config.installRoot(), installerJava(baseVersion),
@@ -855,6 +988,7 @@ Platform.runLater(() -> {
             if (installed == null) {
                 throw new IOException("Установщик не создал профиль " + actualId);
             }
+            ensureLoaderArtifacts(installed);
         }
         if (displayName == null || displayName.isBlank()
                 || installed.displayName().equals(displayName.trim())) {
@@ -872,6 +1006,50 @@ Platform.runLater(() -> {
         return store.createNamedAlias(installed.id(), requestedName);
     }
 
+    /**
+     * Re-runs the loader's installer when the jars FML resolves at launch are missing.
+     *
+     * <p>The installer writes its version JSON before it downloads anything, so an interrupted
+     * install leaves a profile that looks complete and dies at launch inside FML's own locator,
+     * with a stack trace the user cannot act on. Running the installer again is what actually
+     * produces the missing files: it skips what is already on disk and downloads the rest.
+     *
+     * <p>Only installer-backed loaders are checked. Fabric and vanilla have their libraries
+     * re-downloaded by the regular pipeline on every launch, and NeoForge's layout is deliberately
+     * not verified (see {@link LaunchPreflight}), so for those this is a no-op.
+     */
+    private void ensureLoaderArtifacts(ModProfile profile)
+            throws IOException, InterruptedException {
+
+        if (!profile.loader().needsInstaller()) {
+            return;
+        }
+        List<Path> missing = loaderArtifactsMissing(profile);
+        if (missing.isEmpty()) {
+            return;
+        }
+        log("Неполная установка " + profile.id() + ": не хватает " + missing.size()
+                + " файлов, переустанавливаю " + profile.loader().displayName() + " ...");
+        new ModLoaderInstaller(config.installRoot(), installerJava(profile.baseVersion()), this::log)
+                .install(profile);
+        List<Path> stillMissing = loaderArtifactsMissing(profile);
+        if (!stillMissing.isEmpty()) {
+            throw new IOException(LaunchPreflight.describe(stillMissing));
+        }
+        log("Недостающие файлы загрузчика докачаны");
+    }
+
+    /** The loader jars this profile's launch arguments name but that are absent from disk. */
+    private List<Path> loaderArtifactsMissing(ModProfile profile) {
+        try {
+            JsonObject json = new VersionResolver(config.versionsDir()).load(profile.id());
+            return LaunchPreflight.missingLoaderArtifacts(json, config.librariesDir());
+        } catch (IOException unreadable) {
+            // An unreadable version JSON is reported with its exact path by the launch itself.
+            return List.of();
+        }
+    }
+
     public void stopGame() {
         if (running == null || !running.isAlive()) {
             running = null;
@@ -887,11 +1065,31 @@ Platform.runLater(() -> {
 
     /** Opens the game folder in the system file manager, creating it when missing. */
     public void openGameFolder() {
+        openFolder(Path.of(config.gameDir).toAbsolutePath());
+    }
+
+    /** Opens the folder the selected build was installed into. */
+    private void openBuildFolder() {
+        String id = selectedBuildId();
+        if (id == null || id.isBlank()) {
+            return;
+        }
+        openFolder(config.versionsDir().resolve(id));
+    }
+
+    /** Opens a folder of the selected build's instance, which is where its data lives. */
+    private void openSubFolder(String name) {
+        Path base = new GameStarter(config, catalog).gameDirFor(selectedProfile());
+        openFolder(name.isEmpty() ? base : base.resolve(name));
+    }
+
+    private void openFolder(Path dir) {
         try {
-            Path dir = Path.of(config.gameDir).toAbsolutePath();
             Files.createDirectories(dir);
-            if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
-                error("Не удалось открыть папку", new IOException("система не поддерживает открытие папок"));
+            if (!Desktop.isDesktopSupported()
+                    || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
+                error("Не удалось открыть папку",
+                        new IOException("система не поддерживает открытие папок"));
                 return;
             }
             Desktop.getDesktop().open(dir.toFile());
@@ -900,12 +1098,115 @@ Platform.runLater(() -> {
         }
     }
 
+    /** Copies the newest crash report, or the launcher's own log when the game never wrote one. */
+    private void copyCrashLog() {
+        try {
+            Path instance = new GameStarter(config, catalog).gameDirFor(selectedProfile());
+            Path newest = newestCrashReport(instance);
+            if (newest == null && !instance.equals(Path.of(config.gameDir).toAbsolutePath())) {
+                newest = newestCrashReport(Path.of(config.gameDir).toAbsolutePath());
+            }
+            String text;
+            String note;
+            if (newest != null) {
+                text = Files.readString(newest);
+                note = "Краш-лог скопирован: " + newest.getFileName();
+            } else {
+                text = view.logArea.getText();
+                note = "Отчётов о падении нет, скопирован вывод лаунчера";
+            }
+            javafx.scene.input.ClipboardContent content = new javafx.scene.input.ClipboardContent();
+            content.putString(text);
+            javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
+            view.log(note);
+        } catch (Exception e) {
+            error("Не удалось скопировать краш-лог", e);
+        }
+    }
+
+    private Path newestCrashReport(Path gameDir) throws IOException {
+        Path dir = gameDir.resolve("crash-reports");
+        if (!Files.isDirectory(dir)) {
+            return null;
+        }
+        try (var stream = Files.list(dir)) {
+            return stream
+                    .filter(path -> path.getFileName().toString().endsWith(".txt"))
+                    .max(java.util.Comparator.comparingLong(path -> path.toFile().lastModified()))
+                    .orElse(null);
+        }
+    }
+
+    /** The banner choice saved for a build, falling back to the mockup's defaults. */
+    private BannerData bannerDataFor(String id) {
+        BannerStore.Entry entry = banners.forId(id);
+        Path image = entry.image == null || entry.image.isBlank() ? null : Path.of(entry.image);
+        return new BannerData(entry.mode, entry.preset, image, entry.auto);
+    }
+
+    /** Screenshots of the build's instance, oldest first so the carousel reads chronologically. */
+    private List<Path> bannerScreenshotsFor(String id) {
+        ModProfile profile = id == null || id.isBlank() ? null : profiles().find(id);
+        Path dir = new GameStarter(config, catalog).gameDirFor(profile).resolve("screenshots");
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        try (var stream = Files.list(dir)) {
+            return stream.filter(path -> {
+                String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+                return name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg");
+            }).sorted(java.util.Comparator.comparingLong(path -> path.toFile().lastModified()))
+                    .toList();
+        } catch (IOException e) {
+            return List.of();
+        }
+    }
+
+    private void updateBannerChoice(java.util.function.Consumer<BannerStore.Entry> change) {
+        change.accept(banners.forId(selectedBuildId()));
+        banners.save();
+        view.syncAppearanceControls();
+        view.refreshBanner();
+    }
+
+    /** Copies a chosen picture into the data folder so moving the original keeps the cover. */
+    private void chooseBannerImage() {
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Выбрать изображение баннера");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter(
+                "Изображения", "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif"));
+        java.io.File selected = chooser.showOpenDialog(view.rootNode().getScene().getWindow());
+        if (selected == null) {
+            return;
+        }
+        Path source = selected.toPath().toAbsolutePath().normalize();
+        String id = selectedBuildId();
+        String key = id == null || id.isBlank() ? "vanilla"
+                : id.replaceAll("[^A-Za-z0-9._-]", "_");
+        String fileName = source.getFileName().toString();
+        int dot = fileName.lastIndexOf('.');
+        String extension = dot < 0 ? ".img" : fileName.substring(dot).toLowerCase(Locale.ROOT);
+        Path target = dataDir.resolve("banners").resolve(key + extension).toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(target.getParent());
+            if (!source.equals(target)) {
+                Files.copy(source, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            updateBannerChoice(entry -> {
+                entry.mode = BannerData.MODE_CUSTOM;
+                entry.image = target.toString();
+            });
+        } catch (IOException e) {
+            error("Не удалось выбрать изображение", e);
+        }
+    }
+
     private void chooseWallpaper() {
         FileChooser chooser = new FileChooser();
         chooser.setTitle("Выбрать обои основного экрана");
         chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter(
                 "Изображения", "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif"));
-        java.io.File selected = chooser.showOpenDialog(view.tabs.getScene().getWindow());
+        java.io.File selected = chooser.showOpenDialog(view.rootNode().getScene().getWindow());
         if (selected == null) {
             return;
         }
@@ -992,7 +1293,7 @@ Platform.runLater(() -> {
         config.minMemoryMb = view.minMemory.getValue();
         config.maxMemoryMb = (int) Math.round(view.maxMemorySlider.getValue());
         config.extraJvmArgs = view.extraArgs.getText();
-        config.javaPath = view.javaPath.getText();
+        config.javaPath = view.javaPathValue();
         config.authServerUrl = view.authServer.getText();
         config.microsoftClientId = view.microsoftClientId.getText();
         config.isolateGameDir = view.toggles.isolateGameDir.isSelected();
@@ -1049,6 +1350,8 @@ private String selectedVersionId() {
     private void updateUiState() {
         boolean offline = AuthProviderInfo.OFFLINE.equals(providerId);
         boolean gameRunning = running != null && running.isAlive();
+        view.setAccount(session == null ? accountUsername : session.username(),
+            displayName(providerId), needsRelogin);
         refreshProfileInfo();
         // A mod loader profile is a valid target even though Mojang's manifest has never heard of it.
         boolean versionOk = catalog.find(selectedVersionId()) != null || selectedProfile() != null;
@@ -1063,7 +1366,7 @@ private String selectedVersionId() {
             view.playButton.setText("Загрузка…");
             view.playButton.setDisable(true);
         } else {
-            view.playButton.setText("ИГРАТЬ");
+            view.playButton.setText("Играть");
             view.playButton.setDisable(!(hasSession && versionOk));
         }
 
@@ -1072,6 +1375,7 @@ private String selectedVersionId() {
         view.loginButton.setDisable(installing);
         view.versionBox.setDisable(installing);
         view.stopButton.setDisable(false);
+        view.connectButton.setDisable(installing || gameRunning || !hasSession || !versionOk);
 
         if (gameRunning || installing) {
             return;
@@ -1087,8 +1391,36 @@ private String selectedVersionId() {
         } else if (!hasSession) {
             view.setStatus("Войдите, чтобы играть.");
         } else {
-            view.setStatus("Готов к запуску");
+            view.setStatus(LauncherView.BASE_STATUS);
         }
+    }
+
+    private void loadAccountSkin(AuthSession account) {
+        if (AuthProviderInfo.OFFLINE.equals(providerId)) {
+            Platform.runLater(() -> {
+                if (session == account) {
+                    view.setAccountSkin(null);
+                }
+            });
+            return;
+        }
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                String url = SkinService.findTextureUrl(account.uuid());
+                if (url != null) {
+                    javafx.scene.image.Image skin = new javafx.scene.image.Image(url, true);
+                    Platform.runLater(() -> {
+                        if (session == account) {
+                            view.setAccountSkin(skin);
+                        }
+                    });
+                }
+            } catch (IOException | InterruptedException ignored) {
+                if (ignored instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
     }
 
 private void setBusy(boolean busy) {
@@ -1097,7 +1429,7 @@ private void setBusy(boolean busy) {
         view.profileBaseVersion.setDisable(busy);
         view.loaderPicker.setDisable(busy);
         view.createProfileButton.setDisable(busy);
-        view.profilesList.setDisable(busy);
+        view.buildList.setDisable(busy);
         view.profileNameField.setDisable(busy);
         view.buildPicker.setDisable(busy || selectedLoader() == ModLoaderType.VANILLA);
         refreshManagedProfileButtons();
@@ -1164,18 +1496,23 @@ private void log(String line) {
             login();
         });
         view.playButton.setOnAction(e -> play());
+        view.connectButton.setOnAction(e -> play(view.serverAddress.getText()));
         view.stopButton.setOnAction(e -> stopGame());
         view.createProfileButton.setOnAction(e -> createLoaderProfile());
-        view.selectProfileButton.setOnAction(e -> selectManagedProfile());
-        view.profileDetailsButton.setOnAction(e -> showManagedProfileDetails());
-        view.deleteProfileButton.setOnAction(e -> deleteManagedProfile());
-        view.profilesList.getSelectionModel().selectedItemProperty()
+        view.buildList.getSelectionModel().selectedItemProperty()
                 .addListener((obs, old, value) -> refreshManagedProfileButtons());
-        view.profilesList.setOnMouseClicked(event -> {
+        view.buildList.setOnMouseClicked(event -> {
             if (event.getClickCount() == 2) {
                 selectManagedProfile();
             }
         });
+        view.buildInfoItem.setOnAction(e -> showManagedProfileDetails());
+        view.deleteBuildItem.setOnAction(e -> deleteManagedProfile());
+        view.openBuildFolderItem.setOnAction(e -> openBuildFolder());
+        view.addBuildButton.setOnAction(e -> view.openWizard());
+        view.accountButton.setOnAction(e -> view.openAccounts());
+        view.manageAccountsButton.setOnAction(e -> view.openAccounts());
+        view.copyCrashButton.setOnAction(e -> copyCrashLog());
         view.profileBaseVersion.valueProperty().addListener((obs, old, value) -> {
             if (value != null) {
                 if (selectedProfile() == null) {
@@ -1191,9 +1528,25 @@ view.loaderPicker.getSelectionModel().selectedItemProperty()
                 });
         view.forgeSupportLink.setOnAction(e -> openForgeSupport());
         view.openModsButton.setOnAction(e -> openModsFolder());
-        view.openFolderButton.setOnAction(e -> openGameFolder());
+        view.gameFolderButton.setOnAction(e -> openGameFolder());
+        view.folderRootItem.setOnAction(e -> openSubFolder(""));
+        view.folderConfigItem.setOnAction(e -> openSubFolder("config"));
+        view.folderSavesItem.setOnAction(e -> openSubFolder("saves"));
+        view.folderLogsItem.setOnAction(e -> openSubFolder("logs"));
+        view.folderScreensItem.setOnAction(e -> openSubFolder("screenshots"));
         view.chooseWallpaperButton.setOnAction(e -> chooseWallpaper());
         view.clearWallpaperButton.setOnAction(e -> clearWallpaper());
+        view.bannerModeChosen = mode -> updateBannerChoice(entry -> entry.mode = mode);
+        view.bannerPresetChosen = index -> updateBannerChoice(entry -> {
+            entry.mode = BannerData.MODE_PRESET;
+            entry.preset = index;
+        });
+        view.bannerAutoChosen = auto -> updateBannerChoice(entry -> entry.auto = auto);
+        view.bannerPickImage = this::chooseBannerImage;
+        view.bannerResetImage = () -> updateBannerChoice(entry -> {
+            entry.mode = BannerData.MODE_SHOTS;
+            entry.image = "";
+        });
         view.deleteVersionButton.setOnAction(e -> deleteSelectedVersion());
         view.deleteAllVersionsButton.setOnAction(e -> deleteAllVersions());
         view.cleanAssetsButton.setOnAction(e -> cleanAssets());
@@ -1282,6 +1635,11 @@ view.versionBox.getSelectionModel().selectedItemProperty()
     /** Forces a state refresh; used by the UI check after poking the widgets directly. */
     public void refreshState() {
         updateUiState();
+    }
+
+    /** The window itself; only touches are allowed on the UI thread. */
+    private javafx.stage.Stage stage() {
+        return (javafx.stage.Stage) view.rootNode().getScene().getWindow();
     }
 
     /** True while the game process is running. Used by the UI check. */

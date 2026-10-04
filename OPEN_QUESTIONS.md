@@ -118,4 +118,11 @@ ElyPrismLauncher does it.
 - Multiplayer and chat. Chat is per sender and recipient with an offline queue on the sender's
   side. P2P needs signalling plus STUN/TURN, or UPnP with a relay fallback.
 - TLauncher has no confirmed public API.
-- Skins need a separate profile and skin mechanism.
+- Skin upload/editing is deferred. The account pane displays the head from an official Mojang
+  profile texture when available; offline and unsupported third-party profiles use the fallback.
+
+## Build metadata
+
+Named loader profiles keep their display name in the profile's own version JSON. The launcher
+discovers those profiles from disk instead of maintaining a parallel `builds.json` index, so a
+deleted, copied or externally installed profile cannot leave a stale list entry behind.

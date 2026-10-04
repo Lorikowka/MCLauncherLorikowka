@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "com.mymods.mclauncher"
-version = "0.1.0"
+version = providers.gradleProperty("appVersion").getOrElse("0.2.0")
 
 repositories {
     mavenCentral()
@@ -38,7 +38,9 @@ application {
 dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
 
-    listOf("base", "graphics", "controls", "fxml").forEach { module ->
+    // No .fxml files or FXMLLoader anywhere: the window is built in code, so only
+    // base/graphics/controls are needed.
+    listOf("base", "graphics", "controls").forEach { module ->
         implementation("org.openjfx:javafx-$module:$javafxVersion:$javafxPlatform")
     }
 
@@ -89,6 +91,7 @@ tasks.register<Exec>("packageApp") {
             "--main-class", application.mainClass.get(),
             "--dest", packageDestination.get().asFile.absolutePath,
             "--java-options", "-Dfile.encoding=UTF-8",
+            "--jlink-options", "--strip-debug --no-man-pages --no-header-files",
         )
     }
     outputs.dir(packageDestination)
@@ -259,6 +262,9 @@ tasks.register<JavaExec>("uiCheck") {
     jvmArgs = listOf(
         "-Dprism.order=sw",
         "-Dfile.encoding=UTF-8",
+        // The check drives the window without a console stage of its own; LauncherView skips
+        // opening one when this is set.
+        "-Dmclauncher.uicheck=true",
     )
 }
 

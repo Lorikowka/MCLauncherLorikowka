@@ -34,6 +34,11 @@ public final class CommandBuilder {
                           Path clientJar) {
 
         public Map<String, String> placeholders(VersionMetadata version) {
+            return placeholders(version, "");
+        }
+
+        public Map<String, String> placeholders(VersionMetadata version,
+                                                String quickPlayMultiplayer) {
             Map<String, String> map = new LinkedHashMap<>();
             map.put("${auth_player_name}", session.username());
             map.put("${version_name}", versionId);
@@ -54,9 +59,11 @@ public final class CommandBuilder {
             map.put("${launcher_name}", "MCLauncher");
             map.put("${quickPlayPath}", "");
             map.put("${quickPlaySingleplayer}", "");
-            map.put("${quickPlayMultiplayer}", "");
+                map.put("${quickPlayMultiplayer}",
+                    quickPlayMultiplayer == null ? "" : quickPlayMultiplayer);
             map.put("${quickPlayRealms}", "");
-            map.put("${launcher_version}", "0.1.0");
+            // Kept in sync with `version` in build.gradle.kts by hand.
+            map.put("${launcher_version}", "0.2.0");
             map.put("${classpath}", classpath(version).stream()
                     .map(Path::toAbsolutePath)
                     .map(Path::toString)
@@ -208,8 +215,15 @@ public final class CommandBuilder {
     public static List<String> build(Path javaExecutable, VersionMetadata version,
                                      Context context, boolean hasAuthlibInjector,
                                      Path authlibJar) {
+        return build(javaExecutable, version, context, hasAuthlibInjector, authlibJar, "");
+    }
 
-        Map<String, String> vars = context.placeholders(version);
+    /** Full command with an optional server address for Minecraft's quick-play feature. */
+    public static List<String> build(Path javaExecutable, VersionMetadata version,
+                                     Context context, boolean hasAuthlibInjector,
+                                     Path authlibJar, String quickPlayMultiplayer) {
+
+        Map<String, String> vars = context.placeholders(version, quickPlayMultiplayer);
         List<String> command = new ArrayList<>();
         command.add(javaExecutable.toAbsolutePath().toString());
 

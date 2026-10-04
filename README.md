@@ -16,17 +16,23 @@ same Minecraft and loader versions; each profile has its own game and mods folde
 | NeoForge | working, Minecraft 1.20.2 and newer |
 | Offline play | working |
 | Ely.by / authlib-injector, Microsoft accounts | implemented, not verified against live services |
+| Account status and skin avatar | working for official Minecraft profile textures; offline profiles use the fallback |
 | Mods | a profile's `mods` folder is opened and counted; no in-app list yet |
 | Forge / NeoForge in the window | working, with Forge's required opt-in and Patreon link |
 | Picking an exact loader build | working, lists every published build for that Minecraft version |
 | Creating named modpack profiles | working, choose a loader/build/name and press Play |
+| Banner screenshots, presets and custom cover | working, saved per build in `banners.json` |
+| Java discovery and memory limit | working, scans installed runtimes and caps the slider to available memory |
+| Main-screen wallpaper and appearance | working, saved locally with dark/light themes and accent color |
 | Download performance | libraries and assets download concurrently, with duplicate assets shared |
 | Launcher log on disk | working, `~/.mclauncher/launcher.log` |
-| Multiplayer, chat, P2P, skins | not started |
+| Skin upload/editing, multiplayer, chat and P2P | not started |
 
-Verified on 2026-10-02: 70 unit tests, `uiCheck` 94 passed, and `smokeLaunch` reaching the loading
-stage for vanilla, Fabric, Forge and NeoForge. See `OPEN_QUESTIONS.md` for the details behind the
-loader support and for what is deliberately not done yet.
+Verified on 2026-10-03: 89 unit tests, `uiCheck` 117 passed, and vanilla `smokeLaunch` reached the
+loading stage. Windows EXE packaging is covered by `packageWindowsExe`.
+
+See `OPEN_QUESTIONS.md` for the details behind loader support, profile storage and what is
+deliberately not done yet.
 
 NeoForge does not exist for Minecraft 1.20.1. It took over from Forge at 1.20.2, so on 1.20.1 the
 loader to use is Forge.

@@ -150,15 +150,6 @@ public final class Http {
         Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
     }
 
-    public static byte[] downloadBytes(String url) throws IOException, InterruptedException {
-        HttpRequest req = request(url).GET().build();
-        HttpResponse<byte[]> res = CLIENT.send(req, HttpResponse.BodyHandlers.ofByteArray());
-        if (res.statusCode() / 100 != 2) {
-            throw new IOException("GET " + url + " -> HTTP " + res.statusCode());
-        }
-        return res.body();
-    }
-
     public static InputStream openStream(String url) throws IOException, InterruptedException {
         HttpRequest req = request(url).GET().build();
         HttpResponse<InputStream> res = CLIENT.send(req, HttpResponse.BodyHandlers.ofInputStream());

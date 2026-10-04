@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
-import java.util.UUID;
 import java.util.stream.Stream;
 
 import com.google.gson.JsonObject;
@@ -100,8 +99,9 @@ public final class ModProfileStore {
             String base = info != null && info.has("base") ? info.get("base").getAsString()
                     : baseFrom(json);
             String loaderVersion = info != null && info.has("version")
+                    && info.get("version").isJsonPrimitive()
                     ? info.get("version").getAsString()
-                    : null;
+                    : loaderVersionFrom(json, type);
             String displayName = info != null && info.has("name")
                     ? info.get("name").getAsString()
                     : null;
@@ -129,8 +129,14 @@ public final class ModProfileStore {
         if (slug.length() > 24) {
             slug = slug.substring(0, 24).replaceAll("-$", "");
         }
-        String id = sourceId + "-pack-" + slug + "-"
-                + UUID.randomUUID().toString().substring(0, 8);
+        // The folder is just the build name: a version id like <base>-<loader>-<build>-pack-<slug>-<hash>
+        // tells a user nothing about where to drop mods, while "storymain" matches what they typed.
+        // Slug never contains dots, so it cannot collide with a vanilla or loader profile id; the
+        // loop only guards against another build already claiming the name.
+        String id = slug;
+        for (int n = 2; Files.exists(versionsDir.resolve(id)); n++) {
+            id = slug + "-" + n;
+        }
         Path sourceFile = versionsDir.resolve(sourceId).resolve(sourceId + ".json");
         JsonObject json = JsonParser.parseString(Files.readString(sourceFile, StandardCharsets.UTF_8))
                 .getAsJsonObject().deepCopy();
@@ -156,6 +162,36 @@ public final class ModProfileStore {
     /** Falls back to the inherited id, which is the base version for every installed profile. */
     private static String baseFrom(JsonObject json) {
         return json.has("inheritsFrom") ? json.get("inheritsFrom").getAsString() : "";
+    }
+
+    /**
+     * Loader version of a profile whose marker does not carry one.
+     *
+     * <p>Profiles written before the marker stored its version — or read from an installer's
+     * output before the marker was added — still name the loader in the launch arguments the
+     * installer left behind, and in the id the launcher and the installers agree on. Without one
+     * of those the profile loads but cannot be repaired or reinstalled, because both need the
+     * version to build the installer URL.
+     */
+    private static String loaderVersionFrom(JsonObject json, ModLoaderType type) {
+        String fromArguments = LaunchPreflight.fmlArgument(json, "--fml.forgeVersion");
+        if (fromArguments != null && !fromArguments.isBlank()) {
+            return fromArguments;
+        }
+        String base = baseFrom(json);
+        String id = json.has("id") ? json.get("id").getAsString() : "";
+        String prefix = type == ModLoaderType.FABRIC
+                ? "fabric-" + base + "-"
+                : base + "-" + type.id() + "-";
+        if (base.isEmpty() || !id.startsWith(prefix)) {
+            return null;
+        }
+        // What follows the prefix is the loader version, then possibly a pack alias suffix. A
+        // version offered for installation never contains a dash of its own (see the build
+        // patterns in ModLoaderCatalog), so the first segment is the whole version.
+        String rest = id.substring(prefix.length());
+        int alias = rest.indexOf('-');
+        return alias < 0 ? rest : rest.substring(0, alias);
     }
 
     /** Mod file names currently in the profile's mods folder. */

@@ -101,6 +101,44 @@ class CommandBuilderTest {
     }
 
     @Test
+    void quickPlayAddressIsPassedAsMinecraftArgument() {
+        VersionMetadata version = VersionMetadata.fromJson(JsonParser.parseString("""
+                {
+                  "id": "1.20.6",
+                  "type": "release",
+                  "mainClass": "net.minecraft.client.main.Main",
+                  "libraries": [],
+                  "arguments": {
+                    "game": ["--quickPlayMultiplayer", "${quickPlayMultiplayer}"]
+                  }
+                }
+                """).getAsJsonObject());
+
+        List<String> command = CommandBuilder.build(
+                Path.of("java"), version, context(version, "Tester"), false, null,
+                "play.example.net:25565");
+
+        int quickPlayIndex = command.indexOf("--quickPlayMultiplayer");
+        assertTrue(version.supportsQuickPlayMultiplayer());
+        assertTrue(quickPlayIndex >= 0, command.toString());
+        assertEquals("play.example.net:25565", command.get(quickPlayIndex + 1));
+    }
+
+    @Test
+    void oldVersionDoesNotClaimQuickPlaySupport() {
+        VersionMetadata version = VersionMetadata.fromJson(JsonParser.parseString("""
+                {
+                  "id": "1.12.2",
+                  "type": "release",
+                  "mainClass": "net.minecraft.client.main.Main",
+                  "libraries": []
+                }
+                """).getAsJsonObject());
+
+        assertFalse(version.supportsQuickPlayMultiplayer());
+    }
+
+    @Test
     void featureGatedArgumentsAreNotPassed() {
         // Real snippet from the 1.20.1 version JSON. Passing this puts the game into demo mode.
         VersionMetadata version = VersionMetadata.fromJson(JsonParser.parseString("""

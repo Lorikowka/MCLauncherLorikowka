@@ -51,6 +51,9 @@ public final class LauncherConfig {
     /** Version id to preselect on the next start. Empty means "use the default release". */
     public String lastVersionId = "";
 
+    /** Last Minecraft server address used by direct connect. */
+    public String lastServerAddress = "";
+
     /** Nickname typed in offline mode, so the next start does not ask for it again. */
     public String lastUsername = "";
 
@@ -61,7 +64,7 @@ public final class LauncherConfig {
     public String closeAction = "close";
 
     public String appearanceTheme = "dark";
-    public String appearanceAccent = "#63A86F";
+    public String appearanceAccent = "#FF7A59";
     public int interfaceFontSize = 13;
 
     public String mainMenuWallpaper = "";

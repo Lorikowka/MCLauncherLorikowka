@@ -2,6 +2,7 @@ package com.mymods.mclauncher.mc;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -36,11 +37,18 @@ class ModProfileStoreTest {
 
         ModProfile alias = store.createNamedAlias(sourceId, "My Adventure Pack");
 
-        assertTrue(alias.id().startsWith(sourceId + "-pack-my-adventure-pack-"));
+        // The folder is named after the build alone, so the user can find it without decoding
+        // an id like <base>-<loader>-<build>-pack-<slug>-<hash>.
+        assertEquals("my-adventure-pack", alias.id());
         assertEquals("My Adventure Pack", alias.displayName());
         assertEquals(sourceId, store.find(sourceId).id());
         assertEquals("My Adventure Pack", store.find(alias.id()).displayName());
         assertTrue(Files.isRegularFile(versionsDir.resolve(alias.id()).resolve(alias.id() + ".json")));
+
+        // A second build with the same name must not overwrite the first one.
+        ModProfile twin = store.createNamedAlias(sourceId, "My Adventure Pack");
+        assertEquals("my-adventure-pack-2", twin.id());
+        assertEquals("My Adventure Pack", store.find(alias.id()).displayName());
     }
 
     @Test
@@ -143,6 +151,57 @@ class ModProfileStoreTest {
         // nor the shared assets, which every other version still needs.
         assertTrue(Files.isDirectory(versionsDir.resolve("1.21.1")));
         assertTrue(Files.isRegularFile(assets.resolve("objects").resolve("ab")));
+    }
+
+    @Test
+    void markerlessForgeProfileRecoversItsVersionFromTheLaunchArguments(@TempDir Path versionsDir)
+            throws IOException {
+        // An installer writes its JSON before the launcher adds the marker; such a file still
+        // names the loader in the --fml arguments, which is what repair needs to run an installer.
+        write(versionsDir, "1.19.2-forge-43.5.2", """
+                {"id":"1.19.2-forge-43.5.2","inheritsFrom":"1.19.2",
+                 "mainClass":"cpw.mods.modlauncher.Launcher",
+                 "libraries":[{"name":"net.minecraftforge:fmlloader:43.5.2"}],
+                 "arguments":{"game":["--launchTarget","forgeclient",
+                 "--fml.forgeVersion","43.5.2","--fml.mcVersion","1.19.2",
+                 "--fml.forgeGroup","net.minecraftforge"]}}
+                """);
+
+        ModProfile profile = new ModProfileStore(versionsDir).find("1.19.2-forge-43.5.2");
+
+        assertNotNull(profile);
+        assertEquals(ModLoaderType.FORGE, profile.loader());
+        assertEquals("1.19.2", profile.baseVersion());
+        assertEquals("43.5.2", profile.loaderVersion());
+    }
+
+    @Test
+    void loaderVersionFallsBackToTheIdWhenTheArgumentsAreGone(@TempDir Path versionsDir)
+            throws IOException {
+        write(versionsDir, "1.19.2-forge-43.5.2", """
+                {"id":"1.19.2-forge-43.5.2","inheritsFrom":"1.19.2",
+                 "libraries":[{"name":"net.minecraftforge:fmlloader:43.5.2"}]}
+                """);
+
+        ModProfile profile = new ModProfileStore(versionsDir).find("1.19.2-forge-43.5.2");
+
+        assertNotNull(profile);
+        assertEquals("43.5.2", profile.loaderVersion());
+    }
+
+    @Test
+    void markerlessFabricProfileRecoversItsVersionFromTheId(@TempDir Path versionsDir)
+            throws IOException {
+        write(versionsDir, "fabric-1.20.1-0.19.5", """
+                {"id":"fabric-1.20.1-0.19.5","inheritsFrom":"1.20.1","mainClass":"KnotClient",
+                 "libraries":[{"name":"net.fabricmc:fabric-loader:0.19.5"}]}
+                """);
+
+        ModProfile profile = new ModProfileStore(versionsDir).find("fabric-1.20.1-0.19.5");
+
+        assertNotNull(profile);
+        assertEquals(ModLoaderType.FABRIC, profile.loader());
+        assertEquals("0.19.5", profile.loaderVersion());
     }
 
     private static void writeFabric(Path versionsDir, String id, String base, String loaderVersion)

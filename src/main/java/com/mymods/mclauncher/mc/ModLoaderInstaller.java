@@ -4,7 +4,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -82,6 +84,7 @@ public final class ModLoaderInstaller {
         log.accept(loader.displayName() + ": ставлю " + base + " / " + loaderVersion);
 
         Set<String> before = existingVersionIds();
+        Map<String, String> previousNames = existingProfileNames(loaderVersion);
         new InstallerJarRunner(installRoot, javaExecutable, log).run(url, expectedId);
 
         String installedId = discoverInstalledVersion(loader, expectedId, loaderVersion, before);
@@ -89,6 +92,12 @@ public final class ModLoaderInstaller {
         JsonObject version = JsonParser
                 .parseString(Files.readString(file, StandardCharsets.UTF_8)).getAsJsonObject();
         markProfile(version, profile, loader, loaderVersion, base);
+        // The installer rewrites the version JSON from scratch, so a name the user gave this
+        // profile survives only if it was read before the run; the marker just written has none.
+        String previousName = previousNames.get(installedId);
+        if (previousName != null) {
+            version.getAsJsonObject("modloader").addProperty("name", previousName);
+        }
         Files.writeString(file, version.toString(), StandardCharsets.UTF_8);
 
         log.accept(loader.displayName() + ": профиль версии записан: " + installedId);
@@ -97,10 +106,64 @@ public final class ModLoaderInstaller {
 
     /** Ids of the versions already present, so a fresh install can be told apart from an old one. */
     private Set<String> existingVersionIds() throws IOException {
-        try (var dirs = Files.list(versionsDir())) {
+        Path dir = versionsDir();
+        if (!Files.isDirectory(dir)) {
+            return Set.of();
+        }
+        try (var dirs = Files.list(dir)) {
             return dirs.filter(Files::isDirectory)
                     .map(p -> p.getFileName().toString())
                     .collect(Collectors.toSet());
+        }
+    }
+
+    /**
+     * Profile names of every version this loader build could be rewritten under.
+     *
+     * <p>Read before the installer runs, because it replaces the version JSON wholesale: once it
+     * finishes there is nothing left on disk to recover the name from. The id filter mirrors the
+     * one {@link #discoverInstalledVersion} uses, so the map covers whichever file that picks.
+     */
+    private Map<String, String> existingProfileNames(String loaderVersion) throws IOException {
+        Path dir = versionsDir();
+        Map<String, String> names = new HashMap<>();
+        if (!Files.isDirectory(dir)) {
+            return names;
+        }
+        try (var children = Files.list(dir)) {
+            for (Path child : children.filter(Files::isDirectory).toList()) {
+                String id = child.getFileName().toString();
+                if (!id.contains(loaderVersion)) {
+                    continue;
+                }
+                String name = profileName(child.resolve(id + ".json"));
+                if (name != null) {
+                    names.put(id, name);
+                }
+            }
+        }
+        return names;
+    }
+
+    /** The name a version JSON's marker carries, or null when the profile is unnamed. */
+    private static String profileName(Path file) {
+        try {
+            if (!Files.isRegularFile(file)) {
+                return null;
+            }
+            JsonObject json = JsonParser.parseString(
+                    Files.readString(file, StandardCharsets.UTF_8)).getAsJsonObject();
+            if (!json.has("modloader") || !json.get("modloader").isJsonObject()) {
+                return null;
+            }
+            JsonObject marker = json.getAsJsonObject("modloader");
+            if (!marker.has("name") || !marker.get("name").isJsonPrimitive()) {
+                return null;
+            }
+            String name = marker.get("name").getAsString();
+            return name.isBlank() ? null : name;
+        } catch (IOException | RuntimeException unparsable) {
+            return null;
         }
     }
 
@@ -131,6 +194,13 @@ public final class ModLoaderInstaller {
             if (!before.contains(id)) {
                 return id;
             }
+        }
+        // Re-running over an existing install creates nothing new, and the id list then also
+        // holds pack aliases built from the same build number. The id the installer was aimed at
+        // wins over those: marking an alias would rewrite a profile the user named, while the
+        // canonical one is the file the installer just replaced.
+        if (usable.contains(expectedId)) {
+            return expectedId;
         }
         return usable.get(usable.size() - 1);
     }

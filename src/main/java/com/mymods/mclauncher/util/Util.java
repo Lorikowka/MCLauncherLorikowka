@@ -2,14 +2,11 @@ package com.mymods.mclauncher.util;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 
 /** Small helpers for filesystem checks, logging and progress reporting. */
 public final class Util {
@@ -41,18 +38,6 @@ public final class Util {
         return sb.toString();
     }
 
-    /** Reads a UTF-8 resource from the launcher jar. */
-    public static String readResource(String name) {
-        try (InputStream in = Util.class.getResourceAsStream(name)) {
-            if (in == null) {
-                return null;
-            }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-    }
-
     /** Runs a task off the UI thread and swallows nothing, reporting failures through {@code onError}. */
     public static void background(String label, ThrowingRunnable task, Consumer<Exception> onError) {
         Thread thread = new Thread(() -> {
@@ -69,20 +54,5 @@ public final class Util {
     @FunctionalInterface
     public interface ThrowingRunnable {
         void run() throws Exception;
-    }
-
-    @FunctionalInterface
-    public interface ThrowingSupplier<T> {
-        T get() throws Exception;
-    }
-
-    public static <T> T firstNonNull(Supplier<T>... suppliers) {
-        for (Supplier<T> supplier : suppliers) {
-            T value = supplier.get();
-            if (value != null) {
-                return value;
-            }
-        }
-        return null;
     }
 }

@@ -4,6 +4,9 @@ package com.mymods.mclauncher.auth;
 public record MicrosoftSession(String username, String uuid, String accessToken, String refreshToken)
         implements AuthSession {
 
+    /** Azure app id of the official launcher, passed to the game as {@code --clientId}. */
+    public static final String LAUNCHER_CLIENT_ID = "00000000402b5328";
+
     @Override
     public String userType() {
         return "mojang";

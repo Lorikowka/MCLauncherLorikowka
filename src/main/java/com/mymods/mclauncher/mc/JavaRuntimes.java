@@ -5,8 +5,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -103,6 +106,100 @@ public final class JavaRuntimes {
             }
         }
         return result;
+    }
+
+    /** Finds usable runtimes from managed installs, the environment, PATH and common install roots. */
+    public static List<Runtime> scan(Path runtimesDir) {
+        Map<Path, Runtime> found = new LinkedHashMap<>();
+        try {
+            for (Runtime runtime : listManaged(runtimesDir)) {
+                found.put(runtime.home().toAbsolutePath().normalize(), runtime);
+            }
+        } catch (IOException ignored) {
+        }
+
+        List<Path> executables = new ArrayList<>();
+        String currentHome = System.getProperty("java.home");
+        if (currentHome != null) {
+            addJavaHome(executables, Path.of(currentHome));
+        }
+        String configuredHome = System.getenv("JAVA_HOME");
+        if (configuredHome != null && !configuredHome.isBlank()) {
+            addJavaHome(executables, Path.of(configuredHome));
+        }
+        String path = System.getenv("PATH");
+        if (path != null) {
+            for (String directory : path.split(java.util.regex.Pattern.quote(File.pathSeparator))) {
+                if (!directory.isBlank()) {
+                    executables.add(Path.of(directory).resolve(javaExecutableName()));
+                }
+            }
+        }
+
+        for (Path root : commonInstallRoots()) {
+            addInstallRoot(executables, root);
+        }
+        for (Path executable : executables) {
+            Runtime runtime = detect(executable);
+            if (runtime != null) {
+                found.putIfAbsent(runtime.home().toAbsolutePath().normalize(), runtime);
+            }
+        }
+        return found.values().stream()
+                .sorted(Comparator.comparingInt(Runtime::majorVersion).reversed()
+                        .thenComparing(runtime -> runtime.home().toString()))
+                .toList();
+    }
+
+    private static void addInstallRoot(List<Path> executables, Path root) {
+        addJavaHome(executables, root);
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+        try (var children = Files.list(root)) {
+            children.filter(Files::isDirectory).forEach(path -> addJavaHome(executables, path));
+        } catch (IOException ignored) {
+        }
+    }
+
+    private static void addJavaHome(List<Path> executables, Path home) {
+        executables.add(home.resolve("bin").resolve(javaExecutableName()));
+        executables.add(home.resolve("Contents").resolve("Home").resolve("bin")
+                .resolve(javaExecutableName()));
+    }
+
+    private static List<Path> commonInstallRoots() {
+        List<Path> roots = new ArrayList<>();
+        if (isWindows()) {
+            addEnvironmentRoot(roots, "ProgramFiles", "Java");
+            addEnvironmentRoot(roots, "ProgramFiles", "Eclipse Adoptium");
+            addEnvironmentRoot(roots, "ProgramFiles", "Microsoft");
+            addEnvironmentRoot(roots, "ProgramFiles", "Amazon Corretto");
+            addEnvironmentRoot(roots, "ProgramFiles", "BellSoft");
+            addEnvironmentRoot(roots, "ProgramFiles(x86)", "Java");
+            addEnvironmentRoot(roots, "LOCALAPPDATA", "Programs", "Eclipse Adoptium");
+            addEnvironmentRoot(roots, "LOCALAPPDATA", "Programs", "Microsoft");
+        } else {
+            roots.add(Path.of("/usr/lib/jvm"));
+            String userHome = System.getProperty("user.home");
+            if (userHome != null) {
+                roots.add(Path.of(userHome, ".sdkman", "candidates", "java"));
+                roots.add(Path.of(userHome, "Library", "Java", "JavaVirtualMachines"));
+            }
+            roots.add(Path.of("/Library/Java/JavaVirtualMachines"));
+        }
+        return roots;
+    }
+
+    private static void addEnvironmentRoot(List<Path> roots, String variable, String... parts) {
+        String value = System.getenv(variable);
+        if (value != null && !value.isBlank()) {
+            roots.add(Path.of(value, parts));
+        }
+    }
+
+    private static String javaExecutableName() {
+        return isWindows() ? "java.exe" : "java";
     }
 
     public static Runtime detectSystem() {

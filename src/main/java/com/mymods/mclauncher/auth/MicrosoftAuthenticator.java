@@ -1,7 +1,6 @@
 package com.mymods.mclauncher.auth;
 
 import java.net.http.HttpRequest;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -182,10 +181,16 @@ public final class MicrosoftAuthenticator implements Authenticator {
         xstsBody.addProperty("RelyingParty", "rp://api.minecraftservices.com/");
         xstsBody.addProperty("TokenType", "JWT");
 
-        Http.JsonResponse xsts = post(XSTS_URL, xstsBody, "XSTS: ");
-        if (xsts.status() == 401) {
-            throw new LoginRequest.Rejected(
-                    "Аккаунт не имеет доступа к Minecraft. Нужен owning или gamepass у аккаунта Xbox.");
+        // XSTS refuses with a JSON body carrying an XErr number, so a non-2xx has to be read
+        // here instead of going through post(), which would turn it into a bare "HTTP 401".
+        Http.JsonResponse xsts;
+        try {
+            xsts = Http.postJson(XSTS_URL, xstsBody);
+        } catch (Exception e) {
+            throw new LoginRequest.Rejected("XSTS: сеть недоступна: " + e.getMessage());
+        }
+        if (!xsts.ok()) {
+            throw new LoginRequest.Rejected("XSTS: " + xstsError(xsts));
         }
 
         String mcToken = xsts.body().get("Token").getAsString();
@@ -250,6 +255,41 @@ public final class MicrosoftAuthenticator implements Authenticator {
         tokens.remove(AuthProviderInfo.MICROSOFT);
     }
 
+    /**
+     * Human-readable reason for an XSTS refusal: the body carries an {@code XErr} number that
+     * maps to a well-known account state; anything else falls back to the raw status.
+     */
+    private static String xstsError(Http.JsonResponse res) {
+        if (res.body() != null && res.body().has("XErr")) {
+            long code;
+            try {
+                code = res.body().get("XErr").getAsLong();
+            } catch (RuntimeException notANumber) {
+                code = Long.MIN_VALUE;
+            }
+            // if/else, not switch: these codes exceed Integer.MAX_VALUE, so a long case label
+            // would be parsed as a primitive pattern, which needs preview in Java 17.
+            String known = null;
+            if (code == 2148916227L) {
+                known = "аккаунт заблокирован в Xbox";
+            } else if (code == 2148916233L) {
+                known = "у аккаунта нет учётной записи Xbox — зайдите на minecraft.net "
+                        + "и завершите регистрацию";
+            } else if (code == 2148916235L) {
+                known = "Xbox Live недоступен в вашем регионе";
+            } else if (code == 2148916236L || code == 2148916237L) {
+                known = "нужно подтвердить возраст аккаунта на xbox.com";
+            }
+            if (known != null) {
+                return known;
+            }
+            if (code != Long.MIN_VALUE) {
+                return "отказ Xbox Live, код " + code;
+            }
+        }
+        return res.describe();
+    }
+
     private static Http.JsonResponse post(String url, JsonObject body, String prefix)
             throws LoginRequest.Rejected {
         try {
@@ -263,10 +303,5 @@ public final class MicrosoftAuthenticator implements Authenticator {
         } catch (Exception e) {
             throw new LoginRequest.Rejected(prefix + e.getMessage());
         }
-    }
-
-    /** How long a cached Microsoft session should be considered fresh. */
-    public static Duration cacheLifetime() {
-        return Duration.ofHours(12);
     }
 }

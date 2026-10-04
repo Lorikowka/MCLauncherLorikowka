@@ -115,12 +115,10 @@ public final class RuntimeInstaller {
             Path root = singleRoot(staging);
             deleteTree(target);
             Files.createDirectories(target.getParent());
-            if (root.equals(staging)) {
-                // Some archives have no wrapper directory, so unpack in place.
-                unzip(archive, target);
-            } else {
-                Files.move(root, target);
-            }
+            // root is either the wrapper directory or the staging folder itself when the archive
+            // has none; either way what was unpacked is moved into place as is. Re-reading the
+            // archive here would break tarballs, which unzip() cannot open.
+            Files.move(root, target);
         } finally {
             deleteTree(staging);
         }

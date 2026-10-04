@@ -5,7 +5,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -18,12 +17,81 @@ public final class VersionCatalog {
     public static final String MANIFEST_URL =
             "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json";
 
+    /** A copy younger than this is used as-is, so a normal relaunch needs no network at all. */
+    private static final long MAX_CACHE_AGE_MS = 60 * 60 * 1000;
+
     private final Map<String, McVersion> byId = new ConcurrentHashMap<>();
     private List<McVersion> all = List.of();
+    private final Path cacheFile;
 
-    /** Downloads the manifest and caches it. */
+    /** No disk cache: every {@link #refresh()} goes to Mojang. */
+    public VersionCatalog() {
+        this(null);
+    }
+
+    /**
+     * Keeps a copy of the manifest in {@code cacheFile}: a fresh one replaces the network fetch,
+     * and an offline start falls back to whatever the last successful run left behind.
+     */
+    public VersionCatalog(Path cacheFile) {
+        this.cacheFile = cacheFile;
+    }
+
+    /** Downloads the manifest and caches it, falling back to the disk copy when offline. */
     public void refresh() throws IOException, InterruptedException {
-        JsonObject manifest = Http.getJson(MANIFEST_URL);
+        if (cacheFile != null && freshCache() && loadCache()) {
+            return;
+        }
+        try {
+            JsonObject manifest = Http.getJson(MANIFEST_URL);
+            apply(manifest);
+            saveCache(manifest);
+        } catch (IOException networkFailed) {
+            if (cacheFile != null && loadCache()) {
+                return;
+            }
+            throw networkFailed;
+        }
+    }
+
+    private boolean freshCache() {
+        if (cacheFile == null) {
+            return false;
+        }
+        try {
+            long age = System.currentTimeMillis()
+                    - Files.getLastModifiedTime(cacheFile).toMillis();
+            return age < MAX_CACHE_AGE_MS;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /** Replaces the catalog with the disk copy; false when it is missing or unreadable. */
+    private boolean loadCache() {
+        try {
+            apply(com.google.gson.JsonParser.parseString(Files.readString(cacheFile)).getAsJsonObject());
+            return true;
+        } catch (IOException | RuntimeException e) {
+            System.err.println("Cached version manifest unreadable: " + cacheFile);
+            return false;
+        }
+    }
+
+    /** Best effort: a full disk must not turn a working refresh into a failure. */
+    private void saveCache(JsonObject manifest) {
+        if (cacheFile == null) {
+            return;
+        }
+        try {
+            Files.createDirectories(cacheFile.getParent());
+            Files.writeString(cacheFile, manifest.toString());
+        } catch (IOException e) {
+            System.err.println("Cannot write version manifest cache: " + e.getMessage());
+        }
+    }
+
+    private void apply(JsonObject manifest) {
         all = McVersion.fromJson(manifest);
         byId.clear();
         for (McVersion version : all) {
@@ -51,10 +119,6 @@ public final class VersionCatalog {
     /** Stable releases first by newest, matching how vanilla's own UI orders things. */
     public List<McVersion> releases() {
         return all.stream().filter(McVersion::isRelease).toList();
-    }
-
-    public List<McVersion> snapshots() {
-        return all.stream().filter(v -> !v.isRelease()).toList();
     }
 
     public McVersion find(String id) {
@@ -93,14 +157,5 @@ public final class VersionCatalog {
         Files.createDirectories(dir);
         Files.writeString(cached, json.toString());
         return json;
-    }
-
-    /** Latest release id from the manifest, used by the launcher for updates. */
-    public String latestReleaseId() {
-        McVersion first = releases().stream()
-                .filter(v -> !v.id().toLowerCase(Locale.ROOT).contains("pre"))
-                .findFirst()
-                .orElse(null);
-        return first == null ? null : first.id();
     }
 }

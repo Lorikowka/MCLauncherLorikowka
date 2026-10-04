@@ -37,6 +37,7 @@ public final class UiCheck {
     private static int passed;
 
     public static void main(String[] args) throws Exception {
+        System.setProperty("mclauncher.uicheck", "true");
         CountDownLatch ready = new CountDownLatch(1);
         AtomicReference<Throwable> startupError = new AtomicReference<>();
 
@@ -75,6 +76,11 @@ public final class UiCheck {
         Path dataDir = createDataDir();
         LauncherConfig config = LauncherConfig.load(dataDir);
         config.gameDir = dataDir.resolve("game").toString();
+
+        try (var font = UiCheck.class.getResourceAsStream("/fonts/Rubik-Variable.ttf")) {
+            check("bundled Rubik font loads",
+                font != null && javafx.scene.text.Font.loadFont(font, 13) != null);
+        }
 
         LauncherView view = new LauncherView();
         Region root = view.build();
@@ -117,8 +123,8 @@ public final class UiCheck {
         check("profile is a valid version", !view.playButton.isDisable());
         check("profile info names the loader",
                 view.profileInfo.getText().contains("Fabric"));
-        check("profile info counts mods",
-                view.profileInfo.getText().contains("модов: 1"));
+        check("profile info avoids a stale mod count",
+            !view.profileInfo.getText().contains("модов:"));
         check("profile manager keeps pack name field available",
             view.profileNameField.isManaged());
         check("profile shows its mods folder", view.openModsButton.isManaged());
@@ -137,14 +143,12 @@ public final class UiCheck {
         check("loader picker offers every mod loader",
                 view.loaderPicker.getItems().containsAll(
                     List.of("Ванильный", "Fabric", "Forge", "NeoForge")));
-        check("separate profiles tab exists", view.tabs.getTabs().stream()
-            .anyMatch(tab -> "Сборки".equals(tab.getText())));
-        check("profile list in manager tab", inScene(view.profilesList, root));
-        check("create profile action in manager tab", inScene(view.createProfileButton, root));
-        javafx.scene.control.Tab playTab = view.tabs.getTabs().stream()
-            .filter(tab -> "Запуск".equals(tab.getText())).findFirst().orElseThrow();
-        check("loader selection is kept off the Play tab",
-            !inScene(view.loaderPicker, playTab.getContent()));
+        check("sidebar build list in scene", inScene(view.buildList, root));
+        check("sidebar list shares the picker model",
+            view.buildList.getItems() == view.versionBox.getItems());
+        check("create profile action in scene", inScene(view.createProfileButton, root));
+        check("loader selection is kept off the launch pane",
+            !inScene(view.loaderPicker, view.launchPane));
         check("profile name field in scene", inScene(view.profileNameField, root));
         check("loader picker in scene", inScene(view.loaderPicker, root));
         // A pack often names one exact build, so the newest cannot be the only choice.
@@ -241,7 +245,7 @@ public final class UiCheck {
         view.loginFields.get("username").setText("Steve");
         controller.refreshState();
         check("offline nickname enables play", !view.playButton.isDisable());
-        check("play label stays ИГРАТЬ", view.playButton.getText().equals("ИГРАТЬ"));
+        check("play label reads Играть", view.playButton.getText().equals("Играть"));
 
         // 4. An invalid nickname must not be playable.
         view.loginFields.get("username").setText("плохой ник");
@@ -324,13 +328,75 @@ public final class UiCheck {
         // 14. Layout rules: one column width, no dead space, custom title bar.
         check("all fields share a width", fieldsAligned(view));
         check("play button in footer", inScene(view.playButton, root));
-        check("title bar in scene", inScene(view.titleBar, root));
-        check("open folder button in scene", inScene(view.openFolderButton, root));
-        // Title bar holds the name, a filler and the three window buttons only: no folder
-        // shortcut, and no second copy of the settings tab.
-        check("no settings duplicate in header", view.titleBar.getChildren().size() == 5);
-        check("folder shortcut not in header", !inScene(view.openFolderButton, view.titleBar));
-        check("folder shortcut has tooltip", view.openFolderButton.getTooltip() != null);
+        check("mod count is not shown in launcher stats",
+            root.lookupAll(".stats .stat-value").size() == 2);
+        check("nav bar in scene", inScene(view.navBar, root));
+        check("mods folder button in scene", inScene(view.openModsButton, root));
+        check("direct-connect address field in scene", inScene(view.serverAddress, root));
+        check("direct-connect button in scene", inScene(view.connectButton, root));
+        // The top bar holds the status line, the two nav toggles and the three window buttons
+        // only: no folder shortcut, and no second copy of the nav.
+        check("nav bar has five children", view.navBar.getChildren().size() == 5);
+        check("folder shortcut not in nav bar", !inScene(view.gameFolderButton, view.navBar));
+        check("folder shortcut has tooltip", view.gameFolderButton.getTooltip() != null);
+
+        // The banner carries its own appearance chooser from the mockup.
+        check("appearance button enabled", !view.editBannerButton.isDisable());
+        check("banner cover is painted for the selected build", view.bannerPainted());
+        view.openAppearance();
+        check("appearance pop opens", view.isAppearanceOpen());
+        check("appearance pop titles the selected build",
+            view.appearanceTitle.getText().contains("1.20.1"));
+        java.util.Set<Node> bannerModes = root.lookupAll(".seg-button");
+        javafx.scene.control.ToggleButton presetsMode = bannerModes.stream()
+            .filter(node -> node instanceof javafx.scene.control.ToggleButton)
+            .map(node -> (javafx.scene.control.ToggleButton) node)
+            .filter(button -> "Заготовки".equals(button.getText()))
+            .findFirst().orElseThrow();
+        presetsMode.fire();
+        check("preset panel opens from appearance modes",
+            root.lookupAll(".banner-pop .pop-panel").stream()
+                .filter(Node::isVisible).count() == 1);
+        java.util.Set<Node> bannerPresets = root.lookupAll(".banner-thumb");
+        check("appearance pop shows preset artwork", bannerPresets.size() > 1);
+        ((javafx.scene.control.Button) bannerPresets.stream().skip(1).findFirst()
+            .orElseThrow()).fire();
+        String bannerSettings = Files.readString(dataDir.resolve("banners.json"));
+        check("preset selection is saved for the build",
+            bannerSettings.contains("\"mode\": \"preset\"")
+                && bannerSettings.contains("\"preset\": 1"));
+        javafx.scene.control.ToggleButton shotsMode = bannerModes.stream()
+            .filter(node -> node instanceof javafx.scene.control.ToggleButton)
+            .map(node -> (javafx.scene.control.ToggleButton) node)
+            .filter(button -> "Скриншоты".equals(button.getText()))
+            .findFirst().orElseThrow();
+        shotsMode.fire();
+        javafx.scene.control.CheckBox autoRotate = (javafx.scene.control.CheckBox)
+            root.lookup(".banner-pop .check-row");
+        check("auto-rotate is enabled for screenshot mode", !autoRotate.isDisabled());
+        boolean nextAutoRotate = !autoRotate.isSelected();
+        autoRotate.fire();
+        bannerSettings = Files.readString(dataDir.resolve("banners.json"));
+        check("auto-rotate preference is saved",
+            bannerSettings.contains("\"auto\": " + nextAutoRotate));
+        presetsMode.fire();
+        check("auto-rotate is disabled outside screenshot mode", autoRotate.isDisabled());
+        view.hideAppearance();
+        check("appearance pop closes", !view.isAppearanceOpen());
+
+        view.setAccount("Steve", "Microsoft (Xbox)", true);
+        check("account identity is displayed",
+            "Steve".equals(view.accountName.getText())
+                && "Microsoft (Xbox)".equals(view.accountProvider.getText()));
+        check("relogin badge is shown for an expired session",
+            view.accountBadge.isVisible() && view.accountBadge.isManaged());
+        view.setAccountSkin(new javafx.scene.image.WritableImage(64, 64));
+        check("skin avatar displays the head texture region",
+            view.accountSkin.isVisible()
+                && view.accountSkin.getViewport().equals(new javafx.geometry.Rectangle2D(8, 8, 8, 8)));
+        view.setAccountSkin(null);
+        view.setAccount("Tester", "Offline (без входа)", false);
+        check("relogin badge is hidden after a valid session", !view.accountBadge.isVisible());
 
         // 15. Version management and window behaviour are wired to real settings.
         check("delete selected version button", inScene(view.deleteVersionButton, root));

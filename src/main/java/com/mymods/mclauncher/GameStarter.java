@@ -6,16 +6,17 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.function.Consumer;
 
 import com.google.gson.JsonObject;
 import com.mymods.mclauncher.auth.AuthSession;
 import com.mymods.mclauncher.auth.AuthlibInjector;
+import com.mymods.mclauncher.auth.MicrosoftSession;
 import com.mymods.mclauncher.config.LauncherConfig;
 import com.mymods.mclauncher.mc.CommandBuilder;
 import com.mymods.mclauncher.mc.GameDownloader;
 import com.mymods.mclauncher.mc.GameProcess;
 import com.mymods.mclauncher.mc.JavaRuntimes;
+import com.mymods.mclauncher.mc.LaunchPreflight;
 import com.mymods.mclauncher.mc.McVersion;
 import com.mymods.mclauncher.mc.ModLoaderType;
 import com.mymods.mclauncher.mc.ModProfile;
@@ -55,7 +56,7 @@ public final class GameStarter {
     /** Installs the version if needed, then starts the game. Returns the live process. */
     public GameProcess launch(McVersion version, AuthSession session, Callbacks callbacks)
             throws IOException, InterruptedException {
-        return launch(version, null, session, callbacks);
+        return launch(version, null, session, null, callbacks);
     }
 
     /**
@@ -66,9 +67,21 @@ public final class GameStarter {
     public GameProcess launch(McVersion version, ModProfile profile, AuthSession session,
                               Callbacks callbacks)
             throws IOException, InterruptedException {
+        return launch(version, profile, session, null, callbacks);
+    }
 
-        JsonObject versionJson = resolveVersionJson(version, callbacks);
+    /** Installs a version and starts it, optionally joining a server through quick play. */
+    public GameProcess launch(McVersion version, ModProfile profile, AuthSession session,
+                              String quickPlayAddress, Callbacks callbacks)
+            throws IOException, InterruptedException {
+
+        JsonObject versionJson = resolveVersionJson(version, profile, callbacks);
         VersionMetadata metadata = VersionMetadata.fromJson(versionJson);
+        if (quickPlayAddress != null && !quickPlayAddress.isBlank()
+                && !metadata.supportsQuickPlayMultiplayer()) {
+            throw new IOException("Эта версия Minecraft не поддерживает быстрое подключение. "
+                    + "Выбери более новую версию.");
+        }
 
         GameDownloader downloader = new GameDownloader(config.versionsDir(), config.librariesDir(),
                 config.assetsDir(), config.nativesDir(), callbacks::log);
@@ -82,7 +95,7 @@ public final class GameStarter {
         }
 
         JavaRuntimes.Runtime runtime = resolveJava(metadata, callbacks);
-        Path gameDir = resolveGameDir(session, profile);
+        Path gameDir = resolveGameDir(profile);
 
         CommandBuilder.Context context = new CommandBuilder.Context(
                 gameDir,
@@ -97,21 +110,30 @@ public final class GameStarter {
                 metadata.mainClass,
                 config.windowWidth,
                 config.windowHeight,
-                session instanceof com.mymods.mclauncher.auth.MicrosoftSession ? "00000000402b5328" : "",
+                session instanceof MicrosoftSession ? MicrosoftSession.LAUNCHER_CLIENT_ID : "",
                 extraJvmArgs(runtime, version.id(), profile, callbacks),
                 metadata.libraries,
                 GameDownloader.clientJar(metadata, config.versionsDir()));
 
         List<String> command = CommandBuilder.build(runtime.java(), metadata, context,
-                session.needsAuthlibInjector() && config.useAuthlibInjector, config.authlibJar());
+            session.needsAuthlibInjector() && config.useAuthlibInjector, config.authlibJar(),
+            quickPlayAddress);
 
         callbacks.progress(100, "Запуск " + version.id());
         callbacks.log("Команда запуска:");
         callbacks.log(String.join(" ", command));
 
+        // The downloader has just run, so anything still missing here is a file no download step
+        // can produce — the jars the loader installer was supposed to write, above all. Starting
+        // anyway would fail deep inside FML's locator; reporting it here names the files instead.
+        List<Path> missing = LaunchPreflight.missing(command, config.librariesDir());
+        if (!missing.isEmpty()) {
+            throw new IOException(LaunchPreflight.describe(missing));
+        }
+
         Files.createDirectories(gameDir);
         if (profile != null && profile.moddable()) {
-            Files.createDirectories(loaderModsDir(version.id(), profile, session));
+            Files.createDirectories(loaderModsDir(version.id(), profile));
         }
         return GameProcess.start(command, gameDir, callbacks::log, code -> {
             callbacks.log(code == 0 ? "Игра закрыта" : "Игра завершилась с кодом " + code);
@@ -126,11 +148,20 @@ public final class GameStarter {
      * be flattened before the downloader and argument builder see them. Vanilla versions carry no
      * such link and come straight from the catalog.
      */
-    private JsonObject resolveVersionJson(McVersion version, Callbacks callbacks)
+    private JsonObject resolveVersionJson(McVersion version, ModProfile profile,
+                                          Callbacks callbacks)
             throws IOException, InterruptedException {
 
         VersionResolver resolver = new VersionResolver(config.versionsDir());
         if (resolver.exists(version.id())) {
+            if (profile != null && !resolver.exists(profile.baseVersion())) {
+                McVersion base = catalog.find(profile.baseVersion());
+                if (base == null) {
+                    throw new IOException("Базовая версия Minecraft не найдена: "
+                            + profile.baseVersion());
+                }
+                catalog.loadVersionJson(base, config.versionsDir());
+            }
             // Already on disk, which is the modded case: the installer wrote it.
             JsonObject flat = resolver.resolve(version.id());
             if (flat.has("inheritsFrom")) {
@@ -225,22 +256,33 @@ public final class GameStarter {
      * passes as {@code --gameDir}. Handing them a folder of their own would mean creating a folder
      * the loader never looks in and dropping every mod into it, silently.
      */
-    public Path loaderModsDir(String versionId, ModProfile profile, AuthSession session) {
+    public Path loaderModsDir(String versionId, ModProfile profile) {
         if (profile != null && profile.loader() == ModLoaderType.FABRIC) {
             return modsDir(versionId);
         }
-        return resolveGameDir(session, profile).resolve("mods");
+        return resolveGameDir(profile).resolve("mods");
     }
 
-    /** Isolated installs keep both per-user saves and per-profile loader state. */
-    private Path resolveGameDir(AuthSession session, ModProfile profile) {
-        if (!config.isolateGameDir) {
-            return Path.of(config.gameDir);
+    /**
+     * The instance folder for this profile, exposed for the UI: the folder shortcuts and the crash
+     * report lookup need the same answer the launch uses. A null profile means plain vanilla, which
+     * shares the configured game folder.
+     */
+    public Path gameDirFor(ModProfile profile) {
+        return resolveGameDir(profile);
+    }
+
+    /**
+     * One shared game folder, except that installer-backed loaders get an instance of their own,
+     * so two packs cannot mix their mods. Saves used to be split per nickname under
+     * {@code versions/<name>} as well, which scattered worlds across account folders; that layer
+     * is gone — everything vanilla lives directly in the game folder.
+     */
+    private Path resolveGameDir(ModProfile profile) {
+        if (config.isolateGameDir && profile != null && profile.moddable()
+                && profile.loader() != ModLoaderType.FABRIC) {
+            return Path.of(config.gameDir, "instances", profile.id());
         }
-        Path userDir = Path.of(config.gameDir, "versions", session.username());
-        if (profile != null && profile.moddable() && profile.loader() != ModLoaderType.FABRIC) {
-            return userDir.resolve("instances").resolve(profile.id());
-        }
-        return userDir;
+        return Path.of(config.gameDir);
     }
 }

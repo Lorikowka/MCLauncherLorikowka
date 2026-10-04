@@ -16,7 +16,6 @@ import java.util.List;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.mymods.mclauncher.auth.AuthSession;
 import com.mymods.mclauncher.auth.OfflineSession;
 import com.mymods.mclauncher.config.LauncherConfig;
 import com.mymods.mclauncher.GameStarter;
@@ -218,21 +217,19 @@ class ForgeProfileLaunchTest {
         LauncherConfig config = new LauncherConfig();
         config.gameDir = installRoot.toString();
         GameStarter starter = new GameStarter(config, new VersionCatalog());
-        AuthSession session = new OfflineSession("Tester");
         ModProfile forgeProfile = new ModProfile(FORGE_ID, VANILLA_ID, ModLoaderType.FORGE,
                 "47.4.23", List.of(), null);
         ModProfile fabricProfile = new ModProfile("fabric-1.20.1-0.19.5", VANILLA_ID,
                 ModLoaderType.FABRIC, "0.19.5", List.of(), null);
 
-        Path fabricMods = starter.loaderModsDir("fabric-1.20.1-0.19.5", fabricProfile, session);
-        Path forgeMods = starter.loaderModsDir(FORGE_ID, forgeProfile, session);
+        Path fabricMods = starter.loaderModsDir("fabric-1.20.1-0.19.5", fabricProfile);
+        Path forgeMods = starter.loaderModsDir(FORGE_ID, forgeProfile);
 
         assertEquals(config.versionsDir().resolve("fabric-1.20.1-0.19.5").resolve("mods"),
                 fabricMods,
                 "Fabric keeps a per-profile mods folder, pointed at with -Dfabric.modsFolder");
-        // Forge reads mods from its game directory, isolated by nickname and loader profile.
-        Path gameDir = installRoot.resolve("versions").resolve("Tester")
-            .resolve("instances").resolve(FORGE_ID);
+        // Forge reads mods from its game directory, isolated per loader profile.
+        Path gameDir = installRoot.resolve("instances").resolve(FORGE_ID);
         assertEquals(gameDir.resolve("mods"), forgeMods,
                 "Forge has no mods-folder switch and always reads <gameDir>/mods, so any other "
                         + "folder means the user's mods are silently ignored");
@@ -244,16 +241,15 @@ class ForgeProfileLaunchTest {
         config.gameDir = installRoot.toString();
         config.isolateGameDir = false;
         GameStarter starter = new GameStarter(config, new VersionCatalog());
-        AuthSession session = new OfflineSession("Tester");
         ModProfile forgeProfile = new ModProfile(FORGE_ID, VANILLA_ID, ModLoaderType.FORGE,
                 "47.4.23", List.of(), null);
         ModProfile neoProfile = new ModProfile("neoforge-1.20.1-20.4.100", VANILLA_ID,
                 ModLoaderType.NEOFORGE, "20.4.100", List.of(), null);
 
         assertEquals(Path.of(config.gameDir).resolve("mods"),
-                starter.loaderModsDir(FORGE_ID, forgeProfile, session));
+                starter.loaderModsDir(FORGE_ID, forgeProfile));
         assertEquals(Path.of(config.gameDir).resolve("mods"),
-                starter.loaderModsDir(neoProfile.id(), neoProfile, session),
+                starter.loaderModsDir(neoProfile.id(), neoProfile),
                 "NeoForge reads the game folder just like Forge does");
     }
 

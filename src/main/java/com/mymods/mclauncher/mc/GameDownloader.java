@@ -36,6 +36,7 @@ public final class GameDownloader {
     /** Percent of the bar owned by assets, the bulk of the download. */
     private static final int ASSET_SHARE = 90;
     private static final int DOWNLOAD_WORKERS = 8;
+    private static final int DOWNLOAD_ATTEMPTS = 3;
 
     private record AssetObject(String path, JsonObject metadata) {}
 
@@ -120,17 +121,23 @@ public final class GameDownloader {
         Files.createDirectories(librariesDir);
         Files.createDirectories(assetsDir);
 
+        List<Library> artifacts = version.classpathLibraries();
         List<Library> natives = version.nativeLibraries();
-        int total = 3 + version.classpathLibraries().size() + natives.size();
+        int total = 3 + artifacts.size() + natives.size();
         Progress progress = new Progress(total);
 
         installClientJar(version, versionJson, progress);
-        List<Library> libraries = new ArrayList<>(version.classpathLibraries());
-        libraries.addAll(natives);
-        List<Callable<Void>> libraryTasks = new ArrayList<>(libraries.size());
-        for (Library library : libraries) {
+        List<Callable<Void>> libraryTasks = new ArrayList<>(total);
+        for (Library library : artifacts) {
             libraryTasks.add(() -> {
                 installLibrary(library, progress);
+                report(progress);
+                return null;
+            });
+        }
+        for (Library library : natives) {
+            libraryTasks.add(() -> {
+                installNativeJar(library, progress);
                 report(progress);
                 return null;
             });
@@ -188,8 +195,7 @@ public final class GameDownloader {
     }
 
     private void installLibrary(Library library, Progress progress) throws IOException, InterruptedException {
-        // Native entries store the native jar in their own path/classifier rather than artifact.
-        String relative = library.isNativeArtifact() ? library.nativesPath() : library.path();
+        String relative = library.path();
         String url = library.artifactUrl();
         if (url == null || relative == null) {
             return;
@@ -201,6 +207,29 @@ public final class GameDownloader {
             return;
         }
         download(url, target, library.artifactSha1(), progress);
+        progress.bump();
+    }
+
+    /**
+     * Downloads the natives jar of a library that carries one: for pre-1.13 entries the
+     * {@code downloads.classifiers} file next to the main jar, for 1.13+ entries the artifact
+     * itself (its path already points at the natives jar).
+     */
+    private void installNativeJar(Library library, Progress progress) throws IOException, InterruptedException {
+        boolean oldStyle = library.hasNativesMap();
+        String relative = library.nativesPath();
+        String url = oldStyle ? library.nativesUrl() : library.artifactUrl();
+        String sha1 = oldStyle ? library.nativesSha1() : library.artifactSha1();
+        if (url == null || relative == null) {
+            return;
+        }
+        Path target = librariesDir.resolve(relative.replace('\\', '/'));
+        progress.file(shortName(library));
+        if (valid(target, sha1)) {
+            progress.bump();
+            return;
+        }
+        download(url, target, sha1, progress);
         progress.bump();
     }
 
@@ -339,7 +368,30 @@ public final class GameDownloader {
 
         Files.createDirectories(target.getParent());
         Path tmp = target.resolveSibling(target.getFileName() + ".part");
-        DownloadStream.toFile(url, tmp, ignored -> progress.file(progress.current()));
+        IOException lastFailure = null;
+        for (int attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt++) {
+            try {
+                DownloadStream.toFile(url, tmp, ignored -> progress.file(progress.current()));
+                lastFailure = null;
+                break;
+            } catch (IOException e) {
+                lastFailure = e;
+                if (attempt == DOWNLOAD_ATTEMPTS) {
+                    break;
+                }
+                log.accept("Ошибка загрузки " + target.getFileName() + "; повтор "
+                        + (attempt + 1) + "/" + DOWNLOAD_ATTEMPTS + ": " + e.getMessage());
+                try {
+                    Thread.sleep(250L * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw interrupted;
+                }
+            }
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
         if (sha1 != null) {
             String actual = Util.sha1(tmp);
             if (!actual.equalsIgnoreCase(sha1)) {

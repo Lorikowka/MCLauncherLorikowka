@@ -177,15 +177,29 @@ public record Library(String name, String path, boolean natives, Map<String, Str
         return artifact.has("sha1") ? artifact.get("sha1").getAsString() : null;
     }
 
+    /** True for the pre-1.13 shape: a {@code natives} classifier map beside the plain artifact. */
+    public boolean hasNativesMap() {
+        return nativesClassifier != null && !nativesClassifier.isEmpty();
+    }
+
     /** Download url for the natives jar on this platform, or null. */
     public String nativesUrl() {
-        String classifier = nativesClassifierHere();
+        JsonObject entry = classifierDownload(nativesClassifierHere());
+        return entry != null && entry.has("url") ? entry.get("url").getAsString() : null;
+    }
+
+    /** Sha1 of the natives jar on this platform, or null. */
+    public String nativesSha1() {
+        JsonObject entry = classifierDownload(nativesClassifierHere());
+        return entry != null && entry.has("sha1") ? entry.get("sha1").getAsString() : null;
+    }
+
+    private JsonObject classifierDownload(String classifier) {
         if (classifier == null || !downloads.has("classifiers")) {
             return null;
         }
         JsonObject classifiers = downloads.getAsJsonObject("classifiers");
-        JsonObject entry = classifiers.has(classifier) ? classifiers.getAsJsonObject(classifier) : null;
-        return entry != null && entry.has("url") ? entry.get("url").getAsString() : null;
+        return classifiers.has(classifier) ? classifiers.getAsJsonObject(classifier) : null;
     }
 
     /**

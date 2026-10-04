@@ -3,6 +3,8 @@ package com.mymods.mclauncher.mc;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 /** Everything the launcher needs to know about one Minecraft version. */
@@ -108,11 +110,45 @@ public final class VersionMetadata {
         }
     }
 
-    /** Libraries that belong on the classpath here, native jars excluded. */
+    /** Whether Mojang's game arguments can accept the direct-connect address. */
+    public boolean supportsQuickPlayMultiplayer() {
+        if (arguments == null || !arguments.has("game")) {
+            return false;
+        }
+        return containsQuickPlayPlaceholder(arguments.getAsJsonArray("game"));
+    }
+
+    private static boolean containsQuickPlayPlaceholder(JsonElement element) {
+        if (element.isJsonPrimitive()) {
+            return element.getAsJsonPrimitive().isString()
+                    && element.getAsString().contains("${quickPlayMultiplayer}");
+        }
+        if (element.isJsonArray()) {
+            JsonArray values = element.getAsJsonArray();
+            for (JsonElement value : values) {
+                if (containsQuickPlayPlaceholder(value)) {
+                    return true;
+                }
+            }
+        } else if (element.isJsonObject()) {
+            for (var entry : element.getAsJsonObject().entrySet()) {
+                if (containsQuickPlayPlaceholder(entry.getValue())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Libraries whose main jar has to exist locally: the classpath itself plus the pre-1.13
+     * entries that pair that same jar with a {@code natives} classifier map. Pure 1.13+ natives
+     * entries are excluded — their artifact is the natives jar, handled by {@link #nativeLibraries()}.
+     */
     public List<Library> classpathLibraries() {
         return libraries.stream()
                 .filter(Library::appliesHere)
-                .filter(l -> !l.isNativeArtifact())
+                .filter(l -> !l.isNativeArtifact() || l.hasNativesMap())
                 .toList();
     }
 
@@ -120,12 +156,14 @@ public final class VersionMetadata {
      * Native jars to unpack before launch.
      *
      * <p>For 1.13+ these are plain library entries whose own path is the native jar. For older
-     * versions the native jar sits next to the main one under a {@code -natives} name.
+     * versions the native jar sits next to the main one under a {@code -natives} name and is
+     * downloaded from {@code downloads.classifiers}.
      */
     public List<Library> nativeLibraries() {
         return libraries.stream()
                 .filter(Library::appliesHere)
-                .filter(l -> l.isNativeArtifact() && l.artifactUrl() != null)
+                .filter(l -> l.isNativeArtifact()
+                        && (l.hasNativesMap() ? l.nativesUrl() != null : l.artifactUrl() != null))
                 .toList();
     }
 }
